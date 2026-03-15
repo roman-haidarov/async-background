@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        ruby: ['3.3', '3.4']
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Ruby
+      uses: ruby/setup-ruby@v1
+      with:
+        ruby-version: ${{ matrix.ruby }}
+        bundler-cache: true
+    
+    - name: Install dependencies
+      run: bundle install
+    
+    - name: Check syntax
+      run: |
+        echo "Checking Ruby syntax..."
+        find lib -name "*.rb" -exec ruby -c {} \;
+    
+    - name: Build gem
+      run: |
+        echo "Building gem..."
+        gem build async-background.gemspec
+        ls -la *.gem
+        echo "✓ Gem built successfully on Ruby ${{ matrix.ruby }}"
+    
+    - name: Verify gem contents
+      run: |
+        echo "Checking gem contents..."
+        gem specification async-background-*.gem
+        echo "✓ Gem contents verified"
