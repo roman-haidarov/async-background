@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.2
+
+### Bug Fixes
+- **CRITICAL**: Removed logger parameter from Runner initialize (was unused). Fixed initialization to use Console.logger directly which now properly initializes in forked processes with correct context
+
 ## 0.2.1
 
 ### Bug Fixes

@@ -14,8 +14,8 @@ module Async
     class Runner
       attr_reader :logger, :semaphore, :heap, :worker_index, :total_workers
 
-      def initialize(config_path:, job_count: 2, worker_index:, total_workers:, logger: nil)
-        @logger        = logger || Console.logger
+      def initialize(config_path:, job_count: 2, worker_index:, total_workers:)
+        @logger        = Console.logger
         @worker_index  = worker_index
         @total_workers = total_workers
         @running       = true
