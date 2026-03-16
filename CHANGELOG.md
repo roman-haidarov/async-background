@@ -1,6 +1,11 @@
 # Changelog
 
-## 0.2.0 (unreleased)
+## 0.2.1
+
+### Bug Fixes
+- **CRITICAL**: Added missing `require 'console'` in main module. Logger was nil because Console gem was not imported, causing `undefined method 'info' for nil` errors on worker initialization
+
+## 0.2.0
 
 ### Bug Fixes
 - **CRITICAL**: Removed hidden ActiveSupport dependency. Replaced `safe_constantize` with `Object.const_get` + `NameError` handling
