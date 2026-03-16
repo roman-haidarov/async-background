@@ -2,6 +2,7 @@
 
 require 'async'
 require 'async/semaphore'
+require 'console'
 require 'fugit'
 
 require_relative 'background/version'
