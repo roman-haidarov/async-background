@@ -14,10 +14,11 @@ module Async
     class Runner
       attr_reader :logger, :semaphore, :heap, :worker_index, :total_workers
 
-      def initialize(config_path:, job_count: 2, worker_index:, total_workers:)
-        @logger        = Console.logger
+      def initialize(config_path:, job_count: 2, worker_index:, total_workers:, logger: nil)
+        @logger        = logger || Console.logger
         @worker_index  = worker_index
         @total_workers = total_workers
+        @running       = true
 
         logger.info { "Async::Background worker_index=#{worker_index}/#{total_workers}, job_count=#{job_count}" }
 
@@ -34,9 +35,12 @@ module Async
             now = monotonic_now
             wait = [entry.next_run_at - now, MIN_SLEEP_TIME].max
             task.sleep wait
+            break unless running?
 
             now = monotonic_now
             while (top = heap.peek) && top.next_run_at <= now
+              break unless running?
+
               entry = heap.pop
 
               if entry.running
@@ -54,7 +58,18 @@ module Async
               heap.push(entry)
             end
           end
+
+          semaphore.wait
         end
+      end
+
+      def stop
+        @running = false
+        logger.info { "Async::Background: stopping gracefully" }
+      end
+
+      def running?
+        @running
       end
 
       private
@@ -62,7 +77,7 @@ module Async
       def build_heap(config_path)
         raise ConfigError, "Schedule file not found: #{config_path}" unless File.exist?(config_path)
 
-        raw = YAML.safe_load_file(config_path, permitted_classes: [Symbol])
+        raw = YAML.safe_load_file(config_path)
         raise ConfigError, "Empty schedule: #{config_path}" unless raw&.any?
 
         heap = MinHeap.new
@@ -100,9 +115,13 @@ module Async
         class_name = config&.dig('class').to_s.strip
         raise ConfigError, "[#{name}] missing class" if class_name.empty?
 
-        job_class = class_name.safe_constantize
-        raise ConfigError, "[#{name}] unknown class: #{class_name}" unless job_class
-        raise ConfigError, "[#{name}] #{class_name} must implement #perform" unless job_class.method_defined?(:perform)
+        begin
+          job_class = Object.const_get(class_name)
+        rescue NameError
+          raise ConfigError, "[#{name}] unknown class: #{class_name}"
+        end
+
+        raise ConfigError, "[#{name}] #{class_name} must implement .perform_now" unless job_class.respond_to?(:perform_now)
 
         interval = config['every']&.then { |v|
           int = v.to_i
@@ -137,7 +156,9 @@ module Async
       rescue ::Async::TimeoutError
         logger.error('Async::Background') { "#{entry.name}: timed out after #{entry.timeout}s" }
       rescue => e
-        logger.error('Async::Background') { "#{entry.name}: #{e.class} #{e.message}" }
+        logger.error('Async::Background') {
+          "#{entry.name}: #{e.class} #{e.message}\n#{e.backtrace.join("\n")}"
+        }
       end
     end
   end
