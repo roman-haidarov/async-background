@@ -28,7 +28,7 @@ module Async
 
       def run
         Async do |task|
-          while true
+          loop do
             entry = heap.peek
             break unless entry
 

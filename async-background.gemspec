@@ -9,7 +9,7 @@ Gem::Specification.new do |spec|
   spec.email = ['romnhajdarov@gmail.com']
 
   spec.summary     = 'Lightweight heap-based cron/interval scheduler for Async.'
-  spec.description = '[STABLE VERSIONS: 0.1.0, 0.2.2, 0.2.3] A production-grade lightweight scheduler built on top of Async. Single event loop with min-heap timer, skip-overlapping execution, jitter, monotonic clock intervals, semaphore concurrency control, and deterministic worker sharding. Designed for Falcon but works with any Async-based application.'
+  spec.description = 'A production-grade lightweight scheduler built on top of Async. Single event loop with min-heap timer, skip-overlapping execution, jitter, monotonic clock intervals, semaphore concurrency control, and deterministic worker sharding. Designed for Falcon but works with any Async-based application.'
 
   spec.homepage = 'https://github.com/roman-haidarov/async-background'
   spec.license  = 'MIT'

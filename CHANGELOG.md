@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.4
+
+### Improvements
+- Removed hardcoded version warning from main module (was checking against fixed list: 0.1.0, 0.2.2, 0.2.3). Use semantic versioning with pre-release suffixes for unstable versions (e.g., 0.3.0.alpha1) instead
+- Removed hardcoded stable versions list from gemspec description — metadata should describe functionality, not versioning
+- Changed `while true` to idiomatic `loop do` in run method
+- Added `Gemfile.lock` to .gitignore (gems should not commit lockfile)
+- Updated README: clarified that job class must respond to `.perform_now` class method (removed confusing mention of instance `#perform`)
+
 ## 0.2.2
 
 ### Bug Fixes

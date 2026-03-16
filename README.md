@@ -1,7 +1,5 @@
 # Async::Background
 
-> ⚠️ **Stable Versions:** `0.1.0`, `0.2.2`, and `0.2.3` — Use these versions for production deployments.
-
 A lightweight, production-grade cron/interval scheduler for Ruby's [Async](https://github.com/socketry/async) ecosystem. Designed for [Falcon](https://github.com/socketry/falcon) but works with any Async-based application.
 
 ## Requirements
@@ -118,7 +116,7 @@ schedule.yml
 
 | Key | Required | Description |
 |---|---|---|
-| `class` | yes | Job class name. Must implement `#perform` instance method and respond to `.perform_now`. |
+| `class` | yes | Job class name. Must respond to `.perform_now` class method. |
 | `every` | one of | Interval in seconds between runs. |
 | `cron` | one of | Cron expression (parsed by Fugit). |
 | `timeout` | no | Max execution time in seconds (default: 30). |
