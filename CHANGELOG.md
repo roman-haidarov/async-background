@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.5
+
+### Features
+- Added graceful shutdown via signal handlers for SIGINT and SIGTERM
+- Enhanced process lifecycle management with proper signal handling using `Signal.trap` and IO.pipe for async communication
+- Improved robustness for production deployments and container orchestration
+- Updated dependencies to work with latest Async 2.x API (removed deprecated `:parent` parameter usage)
+
 ## 0.2.4
 
 ### Improvements

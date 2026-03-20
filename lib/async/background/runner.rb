@@ -12,13 +12,14 @@ module Async
     MAX_JITTER      = 5
 
     class Runner
-      attr_reader :logger, :semaphore, :heap, :worker_index, :total_workers
+      attr_reader :logger, :semaphore, :heap, :worker_index, :total_workers, :shutdown
 
       def initialize(config_path:, job_count: 2, worker_index:, total_workers:)
         @logger        = Console.logger
         @worker_index  = worker_index
         @total_workers = total_workers
         @running       = true
+        @shutdown      = ::Async::Condition.new
 
         logger.info { "Async::Background worker_index=#{worker_index}/#{total_workers}, job_count=#{job_count}" }
 
@@ -28,13 +29,15 @@ module Async
 
       def run
         Async do |task|
+          setup_signal_handlers
+
           loop do
             entry = heap.peek
             break unless entry
 
             now = monotonic_now
             wait = [entry.next_run_at - now, MIN_SLEEP_TIME].max
-            task.sleep wait
+            wait_with_shutdown(task, wait)
             break unless running?
 
             now = monotonic_now
@@ -47,7 +50,7 @@ module Async
                 logger.warn('Async::Background') { "#{entry.name}: skipped, previous run still active" }
               else
                 entry.running = true
-                semaphore.async(parent: task) do
+                semaphore.async do
                   run_job(task, entry)
                 ensure
                   entry.running = false
@@ -59,13 +62,16 @@ module Async
             end
           end
 
-          semaphore.wait
+          semaphore.acquire {}
         end
       end
 
       def stop
+        return unless @running
+
         @running = false
         logger.info { "Async::Background: stopping gracefully" }
+        shutdown.signal
       end
 
       def running?
@@ -73,6 +79,34 @@ module Async
       end
 
       private
+
+      def setup_signal_handlers
+        @signal_r, @signal_w = IO.pipe
+
+        %w[INT TERM].each do |signal|
+          Signal.trap(signal) do
+            @running = false
+            @signal_w.write_nonblock('.') rescue nil
+          end
+        end
+      end
+
+      def wait_with_shutdown(task, duration)
+        timer = task.async(transient: true) do
+          task.sleep duration
+          shutdown.signal
+        end
+
+        watcher = task.async(transient: true) do
+          @signal_r.wait_readable
+          @signal_r.read_nonblock(256) rescue nil
+          shutdown.signal
+        end
+
+        shutdown.wait
+        timer.stop
+        watcher.stop
+      end
 
       def build_heap(config_path)
         raise ConfigError, "Schedule file not found: #{config_path}" unless File.exist?(config_path)
