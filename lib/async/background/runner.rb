@@ -12,7 +12,7 @@ module Async
     MAX_JITTER      = 5
 
     class Runner
-      attr_reader :logger, :semaphore, :heap, :worker_index, :total_workers, :shutdown
+      attr_reader :logger, :semaphore, :heap, :worker_index, :total_workers, :shutdown, :metrics
 
       def initialize(config_path:, job_count: 2, worker_index:, total_workers:)
         @logger        = Console.logger
@@ -20,6 +20,7 @@ module Async
         @total_workers = total_workers
         @running       = true
         @shutdown      = ::Async::Condition.new
+        @metrics       = Metrics.new(worker_index: worker_index, total_workers: total_workers)
 
         logger.info { "Async::Background worker_index=#{worker_index}/#{total_workers}, job_count=#{job_count}" }
 
@@ -47,6 +48,7 @@ module Async
 
               if entry.running
                 logger.warn('Async::Background') { "#{entry.name}: skipped, previous run still active" }
+                metrics.job_skipped(entry)
               else
                 entry.running = true
                 semaphore.async do
@@ -180,14 +182,20 @@ module Async
       end
 
       def run_job(task, entry)
+        metrics.job_started(entry)
         t = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         task.with_timeout(entry.timeout) { entry.job_class.perform_now }
+
+        duration = Process.clock_gettime(Process::CLOCK_MONOTONIC) - t
+        metrics.job_finished(entry, duration)
         logger.info('Async::Background') {
-          "#{entry.name}: completed in #{(Process.clock_gettime(Process::CLOCK_MONOTONIC) - t).round(2)}s"
+          "#{entry.name}: completed in #{duration.round(2)}s"
         }
       rescue ::Async::TimeoutError
+        metrics.job_timed_out(entry)
         logger.error('Async::Background') { "#{entry.name}: timed out after #{entry.timeout}s" }
       rescue => e
+        metrics.job_failed(entry, e)
         logger.error('Async::Background') {
           "#{entry.name}: #{e.class} #{e.message}\n#{e.backtrace.join("\n")}"
         }
