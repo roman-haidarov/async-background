@@ -30,6 +30,7 @@ module Async
       def run
         Async do |task|
           setup_signal_handlers
+          start_signal_watcher(task)
 
           loop do
             entry = heap.peek
@@ -41,10 +42,8 @@ module Async
             break unless running?
 
             now = monotonic_now
-            while (top = heap.peek) && top.next_run_at <= now
+            while (entry = heap.peek) && entry.next_run_at <= now
               break unless running?
-
-              entry = heap.pop
 
               if entry.running
                 logger.warn('Async::Background') { "#{entry.name}: skipped, previous run still active" }
@@ -58,7 +57,7 @@ module Async
               end
 
               entry.reschedule(monotonic_now)
-              heap.push(entry)
+              heap.replace_top(entry)
             end
           end
 
@@ -91,21 +90,20 @@ module Async
         end
       end
 
+      def start_signal_watcher(task)
+        task.async(transient: true) do
+          loop do
+            @signal_r.wait_readable
+            @signal_r.read_nonblock(256) rescue nil
+            shutdown.signal
+            break unless running?
+          end
+        end
+      end
+
       def wait_with_shutdown(task, duration)
-        timer = task.async(transient: true) do
-          task.sleep duration
-          shutdown.signal
-        end
-
-        watcher = task.async(transient: true) do
-          @signal_r.wait_readable
-          @signal_r.read_nonblock(256) rescue nil
-          shutdown.signal
-        end
-
-        shutdown.wait
-        timer.stop
-        watcher.stop
+        task.with_timeout(duration) { shutdown.wait }
+      rescue ::Async::TimeoutError
       end
 
       def build_heap(config_path)

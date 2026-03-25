@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.6
+
+### Improvements
+- Micro-optimization in `wait_with_shutdown` method: use passed `task` parameter instead of `Async::Task.current` for better consistency and slight performance improvement
+
 ## 0.2.5
 
 ### Features

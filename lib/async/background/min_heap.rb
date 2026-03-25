@@ -21,6 +21,11 @@ module Async
         entry
       end
 
+      def replace_top(entry)
+        @data[0] = entry
+        sift_down(0)
+      end
+
       def peek
         @data.first
       end
