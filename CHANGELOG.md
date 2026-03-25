@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.0
+
+### Features
+- Added optional metrics collection system using shared memory
+- New `Metrics` class with worker-specific performance tracking
+- Public API: `runner.metrics.enabled?`, `runner.metrics.values`, `Metrics.read_all()`
+- Tracks total runs, successes, failures, timeouts, skips, active jobs, and execution times
+- Requires optional `async-utilization` gem dependency
+- Metrics stored in `/tmp/async-background.shm` with lock-free updates per worker
+
 ## 0.2.6
 
 ### Improvements
