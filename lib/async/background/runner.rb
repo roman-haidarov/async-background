@@ -10,6 +10,7 @@ module Async
     DEFAULT_TIMEOUT = 30
     MIN_SLEEP_TIME  = 0.1
     MAX_JITTER      = 5
+    QUEUE_POLL_INTERVAL = 5
 
     class Runner
       attr_reader :logger, :semaphore, :heap, :worker_index, :total_workers, :shutdown, :metrics
@@ -86,7 +87,7 @@ module Async
           logger.info { "Async::Background queue: listening on worker #{worker_index}" }
 
           while running?
-            @queue_notifier.wait
+            @queue_notifier.wait(timeout: QUEUE_POLL_INTERVAL)
 
             while running?
               job = @queue_store.fetch(worker_index)
@@ -190,7 +191,7 @@ module Async
             @signal_r.wait_readable
             @signal_r.read_nonblock(256) rescue nil
             shutdown.signal
-            @queue_notifier.try(:notify)
+            @queue_notifier&.notify
             break unless running?
           end
         end

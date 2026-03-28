@@ -22,6 +22,7 @@ module Async
         PRAGMAS = <<~SQL
           PRAGMA journal_mode       = WAL;
           PRAGMA synchronous        = NORMAL;
+          PRAGMA mmap_size          = 0;
           PRAGMA cache_size         = -16000;
           PRAGMA temp_store         = MEMORY;
           PRAGMA busy_timeout       = 5000;
@@ -45,6 +46,7 @@ module Async
           db = SQLite3::Database.new(@path)
           db.execute_batch(PRAGMAS)
           db.execute_batch(SCHEMA)
+          db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
           db.close
           @schema_checked = true
         end
