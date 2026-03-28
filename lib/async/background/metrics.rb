@@ -23,10 +23,11 @@ module Async
         @enabled  = false
         @registry = ::Async::Utilization::Registry.new
         @enabled  = true
-
         ensure_shm!(total_workers, shm_path)
         attach_observer!(worker_index, total_workers, shm_path)
-      rescue LoadError
+      rescue LoadError, ArgumentError
+        @registry = nil
+        @enabled  = false
       end
 
       def enabled?
