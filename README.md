@@ -24,7 +24,7 @@ A lightweight, production-grade cron/interval scheduler for Ruby's [Async](https
 
 ```ruby
 # Gemfile
-gem "async-background"
+gem "async-background"  # Stable versions: 0.3.0, 0.4.4
 
 # Optional: for dynamic job queue
 gem "sqlite3", "~> 2.0"
@@ -32,6 +32,8 @@ gem "sqlite3", "~> 2.0"
 # Optional: for metrics collection
 gem "async-utilization", "~> 0.3"
 ```
+
+> **⚠️ Version Note:** Currently stable versions are **0.3.0** and **0.4.4**. Other versions may have compatibility issues.
 
 ## Quick Start
 
@@ -70,26 +72,69 @@ Async::Background::Runner.new(
 ### With Falcon
 
 ```ruby
-# falcon.rb
-service "scheduler" do
-  service_class do
-    Class.new(Async::Service::Generic) do
-      def setup(container)
-        total = ENV.fetch("BACKGROUND_FORKS", 1).to_i
+#!/usr/bin/env -S falcon-host
+# frozen_string_literal: true
 
-        total.times do |i|
-          container.run(count: 1, restart: true) do |instance|
-            require_relative "config/environment"
-            require "async/background"
+require "falcon/environment/rack"
+require "async/service/generic"
 
-            instance.ready!
+service "web" do
+  include Falcon::Environment::Rack
 
-            Async::Background::Runner.new(
-              config_path:   Rails.root.join("config/schedule.yml"),
-              job_count:     ENV.fetch("LIMIT_JOB_COUNT", 2).to_i,
-              worker_index:  i + 1,
-              total_workers: total
-            ).run
+  count ENV.fetch("FORKS", 1).to_i
+
+  endpoint do
+    host, port = ENV.fetch("APP_HOST", "0.0.0.0"), ENV.fetch("APP_PORT", 3000)
+
+    Async::HTTP::Endpoint.parse("http://#{host}:#{port}")
+  end
+end
+
+if ENV.fetch("BACKGROUND_FORKS", 0).to_i > 0
+  service "scheduler" do
+    service_class do
+      Class.new(Async::Service::Generic) do
+        def setup(container)
+          require "async/background/queue/notifier"
+          require "async/background/queue/store"
+          require "async/background/queue/client"
+
+          total = ENV.fetch("BACKGROUND_FORKS", 2).to_i
+          queue_notifier = Async::Background::Queue::Notifier.new
+          queue_store = Async::Background::Queue::Store.new
+          queue_store.ensure_database!
+          queue_store.close
+
+          Async::Background::Queue.default_client = nil
+
+          total.times do |i|
+            container.run(count: 1, restart: true) do |instance|
+              require_relative "config/environment"
+              require "async/background"
+
+              queue_store = Async::Background::Queue::Store.new
+              queue_store.ensure_database!
+              queue_notifier.for_consumer!
+
+              Async::Background::Queue.default_client = Async::Background::Queue::Client.new(
+                store: queue_store, notifier: queue_notifier
+              )
+
+              instance.ready!
+
+              begin
+                Async::Background::Runner.new(
+                  config_path:    Rails.root.join("config/schedule.yml"),
+                  job_count:      ENV.fetch("LIMIT_JOB_COUNT", 2).to_i,
+                  worker_index:   i + 1,
+                  total_workers:  total,
+                  queue_notifier: queue_notifier,
+                  queue_db_path:  nil
+                ).run
+              ensure
+                queue_store.close if queue_store
+              end
+            end
           end
         end
       end
@@ -196,57 +241,7 @@ The queue uses three components:
 
 The `Notifier` (IO.pipe) is created **before fork** and shared between producer (web process) and consumers (background workers). Each side closes the unused end of the pipe for safety.
 
-### With Falcon
-
-```ruby
-# falcon.rb
-service "scheduler" do
-  service_class do
-    Class.new(Async::Service::Generic) do
-      define_method(:setup) do |container|
-        require "async/background/queue/notifier"
-        require "async/background/queue/store"
-        require "async/background/queue/client"
-
-        total = ENV.fetch("BACKGROUND_FORKS", 2).to_i
-
-        # 1. Create notifier BEFORE fork — pipe is inherited by children
-        queue_notifier = Async::Background::Queue::Notifier.new
-        queue_store    = Async::Background::Queue::Store.new
-
-        # 2. Set default client — now Queue.enqueue works globally
-        Async::Background::Queue.default_client =
-          Async::Background::Queue::Client.new(
-            store: queue_store, notifier: queue_notifier
-          )
-
-        total.times do |i|
-          container.run(count: 1, restart: true) do |instance|
-            require_relative "config/environment"
-            require "async/background"
-
-            # 3. Consumer side — close the write end
-            queue_notifier.for_consumer!
-
-            instance.ready!
-
-            Async::Background::Runner.new(
-              config_path:    Rails.root.join("config/schedule.yml"),
-              job_count:      ENV.fetch("LIMIT_JOB_COUNT", 2).to_i,
-              worker_index:   i + 1,
-              total_workers:  total,
-              queue_notifier: queue_notifier,  # pass the shared notifier
-              queue_db_path:  nil               # uses default: async_background_queue.db
-            ).run
-          end
-        end
-      end
-    end
-  end
-end
-```
-
-> **Note:** `define_method(:setup)` is used instead of `def setup` because `def` creates a new scope and local variables (like `queue_notifier`, `total`) would not be accessible inside `container.run` blocks. `define_method` captures the closure, so all variables remain visible in forked children.
+> **Note:** Конфигурация с поддержкой динамической очереди показана в разделе [With Falcon](#with-falcon) выше.
 
 ### Enqueueing Jobs
 

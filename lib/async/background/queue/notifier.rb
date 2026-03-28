@@ -20,8 +20,8 @@ module Async
           # pipe closed
         end
 
-        def wait
-          @reader.wait_readable
+        def wait(timeout: nil)
+          @reader.wait_readable(timeout)
           drain
         end
 
@@ -54,6 +54,7 @@ module Async
           rescue IO::WaitReadable, EOFError
             break
           end
+          nil
         end
       end
     end

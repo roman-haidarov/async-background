@@ -7,14 +7,14 @@ module Async
       #   Async::Background::Queue.enqueue(SendEmailJob, user_id, "welcome")
       #
       class Client
-        def initialize(store:, notifier:)
+        def initialize(store:, notifier: nil)
           @store    = store
           @notifier = notifier
         end
 
         def push(class_name, args = [])
           id = @store.enqueue(class_name, args)
-          @notifier.notify
+          @notifier&.notify
           id
         end
       end
