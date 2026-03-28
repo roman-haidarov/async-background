@@ -12,7 +12,7 @@ module Async
             class_name TEXT    NOT NULL,
             args       TEXT    NOT NULL DEFAULT '[]',
             status     TEXT    NOT NULL DEFAULT 'pending',
-            created_at REAL   NOT NULL,
+            created_at REAL    NOT NULL,
             locked_by  INTEGER,
             locked_at  REAL
           );
@@ -22,7 +22,6 @@ module Async
         PRAGMAS = <<~SQL
           PRAGMA journal_mode       = WAL;
           PRAGMA synchronous        = NORMAL;
-          PRAGMA mmap_size          = 268435456;
           PRAGMA cache_size         = -16000;
           PRAGMA temp_store         = MEMORY;
           PRAGMA busy_timeout       = 5000;
@@ -37,17 +36,15 @@ module Async
         def initialize(path: self.class.default_path)
           @path = path
           @db   = nil
-          @last_cleanup_at = nil
           @schema_checked = false
+          @last_cleanup_at = nil
         end
 
         def ensure_database!
           require_sqlite3
           db = SQLite3::Database.new(@path)
-          db.execute("PRAGMA auto_vacuum = INCREMENTAL")
           db.execute_batch(PRAGMAS)
           db.execute_batch(SCHEMA)
-          db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
           db.close
           @schema_checked = true
         end
@@ -109,13 +106,12 @@ module Async
         def ensure_connection
           return if @db && !@db.closed?
 
-          finalize_statements
           require_sqlite3
+          finalize_statements
           @db = SQLite3::Database.new(@path)
           @db.execute_batch(PRAGMAS)
 
           unless @schema_checked
-            @db.execute("PRAGMA auto_vacuum = INCREMENTAL")
             @db.execute_batch(SCHEMA)
             @schema_checked = true
           end
