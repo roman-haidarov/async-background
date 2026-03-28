@@ -14,7 +14,10 @@ module Async
     class Runner
       attr_reader :logger, :semaphore, :heap, :worker_index, :total_workers, :shutdown, :metrics
 
-      def initialize(config_path:, job_count: 2, worker_index:, total_workers:)
+      def initialize(
+        config_path:, job_count: 2, worker_index:, total_workers:,
+        queue_notifier: nil, queue_db_path: nil
+      )
         @logger        = Console.logger
         @worker_index  = worker_index
         @total_workers = total_workers
@@ -26,44 +29,20 @@ module Async
 
         @semaphore = ::Async::Semaphore.new(job_count)
         @heap      = build_heap(config_path)
+
+        setup_queue(queue_notifier, queue_db_path)
       end
 
       def run
         Async do |task|
           setup_signal_handlers
           start_signal_watcher(task)
+          start_queue_listener(task) if @listen_queue
 
-          loop do
-            entry = heap.peek
-            break unless entry
-
-            now = monotonic_now
-            wait = [entry.next_run_at - now, MIN_SLEEP_TIME].max
-            wait_with_shutdown(task, wait)
-            break unless running?
-
-            now = monotonic_now
-            while (entry = heap.peek) && entry.next_run_at <= now
-              break unless running?
-
-              if entry.running
-                logger.warn('Async::Background') { "#{entry.name}: skipped, previous run still active" }
-                metrics.job_skipped(entry)
-              else
-                entry.running = true
-                semaphore.async do
-                  run_job(task, entry)
-                ensure
-                  entry.running = false
-                end
-              end
-
-              entry.reschedule(monotonic_now)
-              heap.replace_top(entry)
-            end
-          end
+          scheduler_loop(task)
 
           semaphore.acquire {}
+          @queue_store&.close
         end
       end
 
@@ -73,6 +52,7 @@ module Async
         @running = false
         logger.info { "Async::Background: stopping gracefully" }
         shutdown.signal
+        @queue_notifier&.notify  # unblock queue listener from @reader.wait_readable
       end
 
       def running?
@@ -80,6 +60,118 @@ module Async
       end
 
       private
+
+      def setup_queue(queue_notifier, queue_db_path)
+        @listen_queue = false
+        return unless queue_notifier
+
+        # Lazy require — only loaded when queue is actually used
+        require_relative 'queue/store'
+        require_relative 'queue/notifier'
+        require_relative 'queue/client'
+
+        isolated = ENV.fetch("ISOLATION_FORKS", "").split(",").map(&:to_i)
+        return if isolated.include?(worker_index)
+
+        @listen_queue   = true
+        @queue_notifier = queue_notifier
+        @queue_store    = Queue::Store.new(path: queue_db_path || Queue::Store.default_path)
+
+        recovered = @queue_store.recover(worker_index)
+        logger.info { "Async::Background queue: recovered #{recovered} stale jobs" } if recovered > 0
+      end
+
+      def start_queue_listener(task)
+        task.async do
+          logger.info { "Async::Background queue: listening on worker #{worker_index}" }
+
+          while running?
+            @queue_notifier.wait
+
+            while running?
+              job = @queue_store.fetch(worker_index)
+              break unless job
+
+              semaphore.async { run_queue_job(task, job) }
+            end
+          end
+        end
+      end
+
+      def run_queue_job(task, job)
+        class_name = job[:class_name]
+        args       = job[:args]
+        klass      = resolve_job_class(class_name)
+
+        metrics.job_started(nil)
+        t = monotonic_now
+
+        task.with_timeout(DEFAULT_TIMEOUT) { klass.perform_now(*args) }
+
+        duration = monotonic_now - t
+        metrics.job_finished(nil, duration)
+        @queue_store.complete(job[:id])
+
+        logger.info('Async::Background') {
+          "queue(#{class_name}): completed in #{duration.round(2)}s"
+        }
+      rescue ::Async::TimeoutError
+        metrics.job_timed_out(nil)
+        @queue_store.fail(job[:id])
+        logger.error('Async::Background') { "queue(#{class_name}): timed out" }
+      rescue => e
+        metrics.job_failed(nil, e)
+        @queue_store.fail(job[:id])
+        logger.error('Async::Background') {
+          "queue(#{class_name}): #{e.class} #{e.message}\n#{e.backtrace.join("\n")}"
+        }
+      end
+
+      def resolve_job_class(class_name)
+        raise ConfigError, "empty class name in queue job" if class_name.nil? || class_name.strip.empty?
+
+        names = class_name.split("::")
+        klass = names.reduce(Object) do |mod, name|
+          raise ConfigError, "unknown class: #{class_name}" unless mod.const_defined?(name, false)
+          mod.const_get(name, false)
+        end
+
+        raise ConfigError, "#{class_name} must implement .perform_now" unless klass.respond_to?(:perform_now)
+
+        klass
+      end
+
+      def scheduler_loop(task)
+        loop do
+          entry = heap.peek
+          break unless entry
+
+          now = monotonic_now
+          wait = [entry.next_run_at - now, MIN_SLEEP_TIME].max
+          wait_with_shutdown(task, wait)
+          break unless running?
+
+          now = monotonic_now
+          while (entry = heap.peek) && entry.next_run_at <= now
+            break unless running?
+
+            if entry.running
+              logger.warn('Async::Background') { "#{entry.name}: skipped, previous run still active" }
+              metrics.job_skipped(entry)
+            else
+              entry.running = true
+              semaphore.async do
+                run_job(task, entry)
+              ensure
+                entry.running = false
+              end
+            end
+
+            entry.reschedule(monotonic_now)
+            heap.replace_top(entry)
+          end
+        end
+      end
 
       def setup_signal_handlers
         @signal_r, @signal_w = IO.pipe
@@ -98,6 +190,7 @@ module Async
             @signal_r.wait_readable
             @signal_r.read_nonblock(256) rescue nil
             shutdown.signal
+            @queue_notifier.try(:notify)
             break unless running?
           end
         end
@@ -183,10 +276,10 @@ module Async
 
       def run_job(task, entry)
         metrics.job_started(entry)
-        t = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        t = monotonic_now
         task.with_timeout(entry.timeout) { entry.job_class.perform_now }
 
-        duration = Process.clock_gettime(Process::CLOCK_MONOTONIC) - t
+        duration = monotonic_now - t
         metrics.job_finished(entry, duration)
         logger.info('Async::Background') {
           "#{entry.name}: completed in #{duration.round(2)}s"
