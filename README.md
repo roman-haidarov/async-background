@@ -12,6 +12,7 @@ A lightweight, production-grade cron/interval scheduler for Ruby's [Async](https
 - **Wall clock for cron** — cron jobs use `Time.now` for real-time scheduling
 - **Semaphore concurrency** — configurable parallel job execution per worker
 - **Optional metrics** — shared memory performance tracking with `async-utilization`
+- **Dynamic job queue** — enqueue jobs at runtime via SQLite-backed queue with IO.pipe notifications
 
 ## Requirements
 
@@ -24,6 +25,9 @@ A lightweight, production-grade cron/interval scheduler for Ruby's [Async](https
 ```ruby
 # Gemfile
 gem "async-background"
+
+# Optional: for dynamic job queue
+gem "sqlite3", "~> 2.0"
 
 # Optional: for metrics collection
 gem "async-utilization", "~> 0.3"
@@ -165,6 +169,153 @@ Async::Background::Metrics.read_all(total_workers: 2)
 Metrics are stored in shared memory (`/tmp/async-background.shm`) and persist across worker restarts. Each worker maintains its own segment for lock-free updates.
 
 **Without `async-utilization`**: All metrics methods return empty results and logging continues as normal. No performance impact.
+
+## Dynamic Job Queue (Optional)
+
+In addition to scheduled cron/interval jobs, Async::Background supports a dynamic job queue — enqueue jobs at runtime from any process (web request, console, another worker), and they will be picked up and executed by background workers.
+
+> **⚠️ Required dependency:** The queue module requires the `sqlite3` gem. It is **not** included automatically — you must add it to your Gemfile explicitly.
+
+### Setup
+
+Add to your Gemfile:
+
+```ruby
+gem "sqlite3", "~> 2.0"
+```
+
+### How It Works
+
+The queue uses three components:
+
+| Component | Role |
+|-----------|------|
+| `Queue::Store` | SQLite-backed persistent storage for jobs (WAL mode, prepared statements) |
+| `Queue::Notifier` | `IO.pipe`-based notification — zero-cost wakeup, no polling |
+| `Queue::Client` | Public API for enqueueing jobs |
+
+The `Notifier` (IO.pipe) is created **before fork** and shared between producer (web process) and consumers (background workers). Each side closes the unused end of the pipe for safety.
+
+### With Falcon
+
+```ruby
+# falcon.rb
+service "scheduler" do
+  service_class do
+    Class.new(Async::Service::Generic) do
+      define_method(:setup) do |container|
+        require "async/background/queue/notifier"
+        require "async/background/queue/store"
+        require "async/background/queue/client"
+
+        total = ENV.fetch("BACKGROUND_FORKS", 2).to_i
+
+        # 1. Create notifier BEFORE fork — pipe is inherited by children
+        queue_notifier = Async::Background::Queue::Notifier.new
+        queue_store    = Async::Background::Queue::Store.new
+
+        # 2. Set default client — now Queue.enqueue works globally
+        Async::Background::Queue.default_client =
+          Async::Background::Queue::Client.new(
+            store: queue_store, notifier: queue_notifier
+          )
+
+        total.times do |i|
+          container.run(count: 1, restart: true) do |instance|
+            require_relative "config/environment"
+            require "async/background"
+
+            # 3. Consumer side — close the write end
+            queue_notifier.for_consumer!
+
+            instance.ready!
+
+            Async::Background::Runner.new(
+              config_path:    Rails.root.join("config/schedule.yml"),
+              job_count:      ENV.fetch("LIMIT_JOB_COUNT", 2).to_i,
+              worker_index:   i + 1,
+              total_workers:  total,
+              queue_notifier: queue_notifier,  # pass the shared notifier
+              queue_db_path:  nil               # uses default: async_background_queue.db
+            ).run
+          end
+        end
+      end
+    end
+  end
+end
+```
+
+> **Note:** `define_method(:setup)` is used instead of `def setup` because `def` creates a new scope and local variables (like `queue_notifier`, `total`) would not be accessible inside `container.run` blocks. `define_method` captures the closure, so all variables remain visible in forked children.
+
+### Enqueueing Jobs
+
+From anywhere in your application (web request, console, rake task):
+
+```ruby
+# Job class must implement .perform_now
+class SendEmailJob
+  def self.perform_now(user_id, template)
+    user = User.find(user_id)
+    Mailer.send(user, template)
+  end
+end
+
+# Enqueue — returns the job ID
+Async::Background::Queue.enqueue(SendEmailJob, user_id, "welcome")
+
+# You can also pass the class name as a string
+Async::Background::Queue.enqueue("SendEmailJob", user_id, "welcome")
+```
+
+### Worker Isolation
+
+By default, all background workers listen to the queue. If you want to **exclude** specific workers from queue processing (e.g., dedicate them only to scheduled cron/interval jobs), use the `ISOLATION_FORKS` environment variable:
+
+```bash
+# Workers 1 and 3 will NOT listen to the queue
+ISOLATION_FORKS=1,3
+```
+
+Isolated workers still run their scheduled jobs from `schedule.yml` as normal — they just ignore the dynamic queue.
+
+### Job Lifecycle
+
+| Status | Description |
+|--------|-------------|
+| `pending` | Job enqueued, waiting to be picked up |
+| `running` | Claimed by a worker, currently executing |
+| `done` | Completed successfully |
+| `failed` | Failed with exception or timed out |
+
+- **Recovery on restart:** When a worker starts, it automatically recovers any jobs that were `running` under its `worker_index` (stale after crash/restart) and requeues them as `pending`.
+- **Automatic cleanup:** Completed jobs (`done`) older than 1 hour are deleted periodically (piggyback on `fetch`, every 5 minutes). If more than 100 rows are cleaned, `PRAGMA incremental_vacuum` reclaims disk space.
+- **Timeout:** Queue jobs use the default timeout of 30 seconds.
+
+### Custom Database Path
+
+By default the SQLite database is created at `async_background_queue.db` in the working directory. You can customize it:
+
+```ruby
+Async::Background::Runner.new(
+  # ...
+  queue_db_path: "/var/data/my_queue.db"
+)
+```
+
+### SQLite Configuration
+
+The queue store applies the following SQLite pragmas for optimal performance:
+
+| Pragma | Value | Why |
+|--------|-------|-----|
+| `journal_mode` | WAL | Concurrent reads during writes |
+| `synchronous` | NORMAL | Safe with WAL, lower fsync overhead |
+| `mmap_size` | 256 MB | Memory-mapped I/O for faster reads |
+| `cache_size` | 16000 pages | ~64 MB page cache |
+| `temp_store` | MEMORY | Temp tables in RAM |
+| `busy_timeout` | 5000 ms | Wait instead of failing on lock contention |
+| `journal_size_limit` | 64 MB | Prevent unbounded WAL growth |
 
 ## Architecture
 

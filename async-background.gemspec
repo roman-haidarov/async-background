@@ -35,8 +35,10 @@ Gem::Specification.new do |spec|
   spec.add_dependency 'async',    '~> 2.0'   # Fiber Scheduler-based, requires Ruby 3.1+
   spec.add_dependency 'console',  '~> 1.0'   # Structured logging (ships with Async ecosystem)
   spec.add_dependency 'fugit',    '~> 1.0'   # Cron expression parsing (based on et-orbi + raabro)
-  
+
   # Optional dependencies for enhanced features:
+  # - sqlite3: Required for dynamic job queue (Queue module)
+  #   Add to your Gemfile: gem "sqlite3", "~> 2.0"
   # - async-utilization: Enables shared memory metrics collection across workers
   #   Add to your Gemfile: gem "async-utilization", "~> 0.3"
 

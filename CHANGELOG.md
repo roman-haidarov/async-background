@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.0
+
+### Features
+- **Dynamic job queue** — enqueue jobs at runtime from any process (web, console, rake) with automatic execution by background workers
+  - `Queue::Store` — SQLite-backed persistent storage with WAL mode, prepared statements, and optimized pragmas
+  - `Queue::Notifier` — `IO.pipe`-based zero-cost wakeup between producer and consumer processes (no polling)
+  - `Queue::Client` — public API: `Async::Background::Queue.enqueue(JobClass, *args)`
+  - Automatic recovery of stale `running` jobs on worker restart
+  - Periodic cleanup of completed jobs (piggyback on fetch, every 5 minutes)
+  - `PRAGMA incremental_vacuum` when cleanup removes 100+ rows
+  - Worker isolation via `ISOLATION_FORKS` env variable — exclude specific workers from queue processing
+  - Custom database path via `queue_db_path` parameter
+  - Requires optional `sqlite3` gem (`~> 2.0`) — not included by default, must be added to Gemfile explicitly
+- New Runner parameters: `queue_notifier:` and `queue_db_path:`
+
+### Improvements
+- Unified `monotonic_now` usage across `run_job` and `run_queue_job` (was using direct `Process.clock_gettime` call in `run_job`)
+- `Queue::Notifier#drain` — moved `rescue` inside the loop to avoid stack unwinding on each drain cycle
+
 ## 0.3.0
 
 ### Features
