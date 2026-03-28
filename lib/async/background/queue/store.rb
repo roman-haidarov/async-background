@@ -38,8 +38,7 @@ module Async
           @path = path
           @db   = nil
           @last_cleanup_at = nil
-
-          ensure_schema
+          @schema_checked = false
         end
 
         def enqueue(class_name, args = [])
@@ -96,22 +95,20 @@ module Async
             "Add `gem 'sqlite3', '~> 2.0'` to your Gemfile."
         end
 
-        def ensure_schema
-          require_sqlite3
-
-          db = SQLite3::Database.new(@path)
-          db.execute("PRAGMA auto_vacuum = INCREMENTAL")
-          db.execute_batch(PRAGMAS)
-          db.execute_batch(SCHEMA)
-          db.close
-        end
-
         def ensure_connection
           return if @db && !@db.closed?
 
           finalize_statements
+          require_sqlite3
           @db = SQLite3::Database.new(@path)
           @db.execute_batch(PRAGMAS)
+
+          unless @schema_checked
+            @db.execute("PRAGMA auto_vacuum = INCREMENTAL")
+            @db.execute_batch(SCHEMA)
+            @schema_checked = true
+          end
+
           prepare_statements
           @last_cleanup_at = monotonic_now
         end
