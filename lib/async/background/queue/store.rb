@@ -41,6 +41,17 @@ module Async
           @schema_checked = false
         end
 
+        def ensure_database!
+          require_sqlite3
+          db = SQLite3::Database.new(@path)
+          db.execute("PRAGMA auto_vacuum = INCREMENTAL")
+          db.execute_batch(PRAGMAS)
+          db.execute_batch(SCHEMA)
+          db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+          db.close
+          @schema_checked = true
+        end
+
         def enqueue(class_name, args = [])
           ensure_connection
           @enqueue_stmt.execute(class_name, JSON.generate(args), realtime_now)
