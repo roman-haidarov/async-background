@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.5
+
+### Breaking Changes
+- `PRAGMAS` is now a frozen lambda `PRAGMAS.call(mmap_size)` instead of a static string — if you referenced this constant directly, update your code
+
+### Features
+- New `queue_mmap:` parameter on `Runner` (default: `true`) — allows disabling SQLite mmap for environments where it's unsafe (Docker overlay2)
+- New `mmap:` parameter on `Queue::Store` (default: `true`) — controls `PRAGMA mmap_size` (256 MB when enabled, 0 when disabled)
+- Public `attr_reader :queue_store` on `Runner` — eliminates need for `instance_variable_get` when sharing Store with Client
+
+### Bug Fixes
+- **CRITICAL: fetch race condition** — wrapped `UPDATE ... RETURNING` in `BEGIN IMMEDIATE` transaction to prevent two workers from picking up the same job simultaneously
+- **CRITICAL: mmap + Docker overlay2** — `overlay2` filesystem does not guarantee `write()`/`mmap()` coherence, causing SQLite WAL corruption under concurrent multi-process access. mmap is now configurable via `queue_mmap: false` instead of being hardcoded. Documented proper Docker setup with named volumes in `docs/GET_STARTED.md`
+- **`PRAGMA optimize` on shutdown** — wrapped in `rescue nil` to prevent `SQLite3::BusyException` when another process holds the write lock during graceful shutdown
+- **`PRAGMA incremental_vacuum` was a no-op** — added `PRAGMA auto_vacuum = INCREMENTAL` to schema. Without it, `incremental_vacuum` does nothing. Note: only takes effect on newly created databases; existing databases require a one-time `VACUUM`
+
+### Improvements
+- Replaced index `idx_jobs_status(status)` with composite `idx_jobs_status_id(status, id)` — eliminates sort step in `fetch` query (`ORDER BY id LIMIT 1` is now a direct B-tree lookup)
+- Fixed `finalize_statements` — changed `%i[@enqueue_stmt ...]` to `%i[enqueue_stmt ...]` with `:"@#{name}"` interpolation for idiomatic `instance_variable_get`/`set` usage
+- Added documentation: `README.md` (concise, with warning markers) and `docs/GET_STARTED.md` (step-by-step guide covering schedule config, Falcon integration, Docker setup, dynamic queue)
+
 ## 0.4.0
 
 ### Features
