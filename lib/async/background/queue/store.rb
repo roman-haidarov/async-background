@@ -7,6 +7,7 @@ module Async
     module Queue
       class Store
         SCHEMA = <<~SQL
+          PRAGMA auto_vacuum = INCREMENTAL;
           CREATE TABLE IF NOT EXISTS jobs (
             id         INTEGER PRIMARY KEY,
             class_name TEXT    NOT NULL,
@@ -16,26 +17,30 @@ module Async
             locked_by  INTEGER,
             locked_at  REAL
           );
-          CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+          CREATE INDEX IF NOT EXISTS idx_jobs_status_id ON jobs(status, id);
         SQL
 
-        PRAGMAS = <<~SQL
-          PRAGMA journal_mode       = WAL;
-          PRAGMA synchronous        = NORMAL;
-          PRAGMA mmap_size          = 0;
-          PRAGMA cache_size         = -16000;
-          PRAGMA temp_store         = MEMORY;
-          PRAGMA busy_timeout       = 5000;
-          PRAGMA journal_size_limit = 67108864;
-        SQL
+        MMAP_SIZE = 268_435_456
+        PRAGMAS = ->(mmap_size) {
+          <<~SQL
+            PRAGMA journal_mode       = WAL;
+            PRAGMA synchronous        = NORMAL;
+            PRAGMA mmap_size          = #{mmap_size};
+            PRAGMA cache_size         = -16000;
+            PRAGMA temp_store         = MEMORY;
+            PRAGMA busy_timeout       = 5000;
+            PRAGMA journal_size_limit = 67108864;
+          SQL
+        }.freeze
 
         CLEANUP_INTERVAL = 300
         CLEANUP_AGE      = 3600
 
         attr_reader :path
 
-        def initialize(path: self.class.default_path)
+        def initialize(path: self.class.default_path, mmap: true)
           @path = path
+          @mmap = mmap
           @db   = nil
           @schema_checked = false
           @last_cleanup_at = nil
@@ -44,7 +49,7 @@ module Async
         def ensure_database!
           require_sqlite3
           db = SQLite3::Database.new(@path)
-          db.execute_batch(PRAGMAS)
+          db.execute_batch(PRAGMAS.call(@mmap ? MMAP_SIZE : 0))
           db.execute_batch(SCHEMA)
           db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
           db.close
@@ -59,11 +64,16 @@ module Async
 
         def fetch(worker_id)
           ensure_connection
+          @db.execute("BEGIN IMMEDIATE")
           row = @fetch_stmt.execute(worker_id, realtime_now).first
+          @db.execute("COMMIT")
           return unless row
 
           maybe_cleanup
           { id: row[0], class_name: row[1], args: JSON.parse(row[2]) }
+        rescue
+          @db.execute("ROLLBACK") rescue nil
+          raise
         end
 
         def complete(job_id)
@@ -86,7 +96,7 @@ module Async
           return unless @db && !@db.closed?
 
           finalize_statements
-          @db.execute("PRAGMA optimize")
+          @db.execute("PRAGMA optimize") rescue nil
           @db.close
           @db = nil
         end
@@ -111,7 +121,7 @@ module Async
           require_sqlite3
           finalize_statements
           @db = SQLite3::Database.new(@path)
-          @db.execute_batch(PRAGMAS)
+          @db.execute_batch(PRAGMAS.call(@mmap ? MMAP_SIZE : 0))
 
           unless @schema_checked
             @db.execute_batch(SCHEMA)
@@ -151,10 +161,10 @@ module Async
         end
 
         def finalize_statements
-          %i[@enqueue_stmt @fetch_stmt @complete_stmt @fail_stmt @requeue_stmt @cleanup_stmt].each do |name|
-            stmt = instance_variable_get(name)
+          %i[enqueue_stmt fetch_stmt complete_stmt fail_stmt requeue_stmt cleanup_stmt].each do |name|
+            stmt = instance_variable_get(:"@#{name}")
             stmt&.close rescue nil
-            instance_variable_set(name, nil)
+            instance_variable_set(:"@#{name}", nil)
           end
         end
 

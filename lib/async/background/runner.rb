@@ -13,11 +13,11 @@ module Async
     QUEUE_POLL_INTERVAL = 5
 
     class Runner
-      attr_reader :logger, :semaphore, :heap, :worker_index, :total_workers, :shutdown, :metrics
+      attr_reader :logger, :semaphore, :heap, :worker_index, :total_workers, :shutdown, :metrics, :queue_store
 
       def initialize(
         config_path:, job_count: 2, worker_index:, total_workers:,
-        queue_notifier: nil, queue_db_path: nil
+        queue_notifier: nil, queue_db_path: nil, queue_mmap: true
       )
         @logger        = Console.logger
         @worker_index  = worker_index
@@ -31,7 +31,7 @@ module Async
         @semaphore = ::Async::Semaphore.new(job_count)
         @heap      = build_heap(config_path)
 
-        setup_queue(queue_notifier, queue_db_path)
+        setup_queue(queue_notifier, queue_db_path, queue_mmap)
       end
 
       def run
@@ -62,7 +62,7 @@ module Async
 
       private
 
-      def setup_queue(queue_notifier, queue_db_path)
+      def setup_queue(queue_notifier, queue_db_path, queue_mmap)
         @listen_queue = false
         return unless queue_notifier
 
@@ -76,7 +76,10 @@ module Async
 
         @listen_queue   = true
         @queue_notifier = queue_notifier
-        @queue_store    = Queue::Store.new(path: queue_db_path || Queue::Store.default_path)
+        @queue_store    = Queue::Store.new(
+          path: queue_db_path || Queue::Store.default_path,
+          mmap: queue_mmap
+        )
 
         recovered = @queue_store.recover(worker_index)
         logger.info { "Async::Background queue: recovered #{recovered} stale jobs" } if recovered > 0
