@@ -3,8 +3,6 @@
 module Async
   module Background
     class Entry
-      MIN_SLEEP_TIME = 0.1
-
       attr_reader :name, :job_class, :interval, :cron, :timeout
       attr_accessor :next_run_at, :running
 
@@ -25,7 +23,7 @@ module Async
         else
           now_wall = Time.now
           wait = cron.next_time(now_wall).to_f - now_wall.to_f
-          @next_run_at = monotonic_now + [wait, MIN_SLEEP_TIME].max
+          @next_run_at = monotonic_now + [wait, Async::Background::MIN_SLEEP_TIME].max
         end
       end
     end

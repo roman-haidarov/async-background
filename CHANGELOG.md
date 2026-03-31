@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.5.0
+
+### Features
+- **Delayed jobs** — full support for scheduling jobs in the future
+  - `Queue::Client#push_in(delay, class_name, args)` — enqueue with delay in seconds
+  - `Queue::Client#push_at(time, class_name, args)` — enqueue at a specific time
+  - `Queue.enqueue_in(delay, job_class, *args)` — class-level delayed enqueue
+  - `Queue.enqueue_at(time, job_class, *args)` — class-level scheduled enqueue
+  - New `run_at` column in SQLite `jobs` table — jobs are only fetched when `run_at <= now`
+- **Job module** — Sidekiq-like `include Async::Background::Job` interface
+  - `perform_async(*args)` — immediate queue execution
+  - `perform_in(delay, *args)` — delayed execution after N seconds
+  - `perform_at(time, *args)` — scheduled execution at a specific time
+  - Instance-level `#perform` with class-level `perform_now` delegation
+- **Clock module** — shared `monotonic_now` / `realtime_now` helpers extracted into `Async::Background::Clock`, included by `Runner`, `Queue::Store`, and `Queue::Client`
+
+### Bug Fixes
+- **Runner: incorrect task in `with_timeout`** — `semaphore.async { |job_task| ... }` now correctly receives the child task instead of capturing the parent `task` from the outer scope. Previously, `with_timeout` was applied to the parent task, which could cancel unrelated work
+
+### Improvements
+- **Job API: `#perform` instead of `#perform_now`** — job classes now define `#perform` instance method. The class-level `perform_now` creates instance and calls `#perform`, aligning with ActiveJob / Sidekiq conventions
+- Updated error messages: validation failures now suggest `must include Async::Background::Job` instead of `must implement .perform_now`
+- `Queue::Client` — extracted private `ensure_configured!` and `resolve_class_name` methods for cleaner validation and class name resolution logic
+- `Queue::Notifier` — extracted `IO_ERRORS` constant (`IO::WaitReadable`, `EOFError`, `IOError`) for cleaner `rescue` in `drain`
+- `Queue::Store` — replaced index `idx_jobs_status_id(status, id)` with `idx_jobs_status_run_at_id(status, run_at, id)` for efficient delayed job lookups
+- `Queue::Store` — `fetch` SQL now uses `WHERE status = 'pending' AND run_at <= ?` with `ORDER BY run_at, id` to process jobs in scheduled order
+- Removed duplicated `monotonic_now` / `realtime_now` from `Runner` and `Store` — now provided by `Clock` module
+- Updated documentation: README (Job module examples, Queue architecture diagram, Clock section), GET_STARTED (delayed jobs guide, Job module usage, minimal queue-only example)
+
 ## 0.4.5
 
 ### Breaking Changes

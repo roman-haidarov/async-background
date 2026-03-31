@@ -7,12 +7,14 @@ module Async
   module Background
     class ConfigError < StandardError; end
 
-    DEFAULT_TIMEOUT = 30
-    MIN_SLEEP_TIME  = 0.1
-    MAX_JITTER      = 5
+    DEFAULT_TIMEOUT     = 30
+    MIN_SLEEP_TIME      = 0.1
+    MAX_JITTER          = 5
     QUEUE_POLL_INTERVAL = 5
 
     class Runner
+      include Clock
+
       attr_reader :logger, :semaphore, :heap, :worker_index, :total_workers, :shutdown, :metrics, :queue_store
 
       def initialize(
@@ -53,7 +55,7 @@ module Async
         @running = false
         logger.info { "Async::Background: stopping gracefully" }
         shutdown.signal
-        @queue_notifier&.notify  # unblock queue listener from @reader.wait_readable
+        @queue_notifier&.notify
       end
 
       def running?
@@ -96,13 +98,13 @@ module Async
               job = @queue_store.fetch(worker_index)
               break unless job
 
-              semaphore.async { run_queue_job(task, job) }
+              semaphore.async { |job_task| run_queue_job(job_task, job) }
             end
           end
         end
       end
 
-      def run_queue_job(task, job)
+      def run_queue_job(job_task, job)
         class_name = job[:class_name]
         args       = job[:args]
         klass      = resolve_job_class(class_name)
@@ -110,7 +112,7 @@ module Async
         metrics.job_started(nil)
         t = monotonic_now
 
-        task.with_timeout(DEFAULT_TIMEOUT) { klass.perform_now(*args) }
+        job_task.with_timeout(DEFAULT_TIMEOUT) { klass.perform_now(*args) }
 
         duration = monotonic_now - t
         metrics.job_finished(nil, duration)
@@ -140,7 +142,7 @@ module Async
           mod.const_get(name, false)
         end
 
-        raise ConfigError, "#{class_name} must implement .perform_now" unless klass.respond_to?(:perform_now)
+        raise ConfigError, "#{class_name} must include Async::Background::Job" unless klass.respond_to?(:perform_now)
 
         klass
       end
@@ -164,8 +166,8 @@ module Async
               metrics.job_skipped(entry)
             else
               entry.running = true
-              semaphore.async do
-                run_job(task, entry)
+              semaphore.async do |job_task|
+                run_job(job_task, entry)
               ensure
                 entry.running = false
               end
@@ -252,7 +254,7 @@ module Async
           raise ConfigError, "[#{name}] unknown class: #{class_name}"
         end
 
-        raise ConfigError, "[#{name}] #{class_name} must implement .perform_now" unless job_class.respond_to?(:perform_now)
+        raise ConfigError, "[#{name}] #{class_name} must include Async::Background::Job" unless job_class.respond_to?(:perform_now)
 
         interval = config['every']&.then { |v|
           int = v.to_i
@@ -274,14 +276,10 @@ module Async
         }
       end
 
-      def monotonic_now
-        Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      end
-
-      def run_job(task, entry)
+      def run_job(job_task, entry)
         metrics.job_started(entry)
         t = monotonic_now
-        task.with_timeout(entry.timeout) { entry.job_class.perform_now }
+        job_task.with_timeout(entry.timeout) { entry.job_class.perform_now }
 
         duration = monotonic_now - t
         metrics.job_finished(entry, duration)
