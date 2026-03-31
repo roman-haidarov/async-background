@@ -52,5 +52,4 @@ pids
 *.pid
 *.seed
 
-test_example.rb
-test_schedule.yml
+/test/

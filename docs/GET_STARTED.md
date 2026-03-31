@@ -23,11 +23,13 @@ heavy_import:
   worker: 1
 ```
 
-Each job class must implement `.perform_now`:
+Each job class must include `Async::Background::Job` and implement `#perform`:
 
 ```ruby
 class SyncProductsJob
-  def self.perform_now
+  include Async::Background::Job
+
+  def perform
     Product.sync_all
   end
 end
@@ -169,25 +171,70 @@ Set `mmap_size = 0` in the `PRAGMAS` constant of `Queue::Store`. This forces SQL
 
 ---
 
-## Step 4: Dynamic Queue (Optional)
+## Step 4: Dynamic Queue
 
-Enqueue jobs at runtime from any part of your application:
+Enqueue jobs at runtime from any part of your application.
+
+### Using the Job module (recommended)
+
+Include `Async::Background::Job` for a familiar Sidekiq-like API:
 
 ```ruby
-# Job class — same interface as scheduled jobs
 class SendEmailJob
-  def self.perform_now(user_id, template)
+  include Async::Background::Job
+
+  def perform(user_id, template)
     user = User.find(user_id)
     Mailer.send(user, template)
   end
 end
+```
 
-# Enqueue from a web request, console, rake task, etc.
+Now you have three ways to enqueue:
+
+```ruby
+# Immediate — executes as soon as a worker picks it up
+SendEmailJob.perform_async(user_id, "welcome")
+
+# Delayed — executes after N seconds
+SendEmailJob.perform_in(300, user_id, "reminder")       # in 5 minutes
+SendEmailJob.perform_in(3600, user_id, "follow_up")     # in 1 hour
+
+# Scheduled — executes at a specific time
+SendEmailJob.perform_at(Time.new(2026, 4, 1, 9, 0, 0), user_id, "promo")
+```
+
+> **Note:** `perform` is an instance method. When you include `Async::Background::Job`, the module creates a class-level `perform_now` wrapper that instantiates the class and calls `#perform`. This means your job classes are stateless by default.
+
+### Using the Queue API directly
+
+If you prefer not to use the Job module, use the lower-level API:
+
+```ruby
 Async::Background::Queue.enqueue(SendEmailJob, user_id, "welcome")
+
+# Delayed (seconds)
+Async::Background::Queue.enqueue_in(300, SendEmailJob, user_id, "reminder")
+
+# Scheduled (Time object or float timestamp)
+Async::Background::Queue.enqueue_at(Time.new(2026, 4, 1, 9, 0, 0), SendEmailJob, user_id, "promo")
 
 # Also accepts class name as a string
 Async::Background::Queue.enqueue("SendEmailJob", user_id, "welcome")
+Async::Background::Queue.enqueue_in(60, "SendEmailJob", user_id, "reminder")
 ```
+
+### How delayed jobs work
+
+When you use `perform_in` or `perform_at`, the job is stored in SQLite with a `run_at` timestamp. The worker's `fetch` query filters by `WHERE status = 'pending' AND run_at <= now`, so the job won't be picked up until its scheduled time arrives.
+
+```
+perform_async  →  run_at = now        →  picked up immediately
+perform_in(60) →  run_at = now + 60s  →  picked up after 60 seconds
+perform_at(t)  →  run_at = t          →  picked up after time t
+```
+
+The queue is polled every 5 seconds (`QUEUE_POLL_INTERVAL`), so the actual execution may be delayed by up to 5 seconds after `run_at`.
 
 ### Job lifecycle
 
@@ -225,3 +272,34 @@ Async::Background::Runner.new(
 ```
 
 This is all you need for a single-process setup with no dynamic queue.
+
+---
+
+## Minimal Example: Queue Only (without scheduler)
+
+```ruby
+require "async/background"
+
+# Define a job
+class MyJob
+  include Async::Background::Job
+
+  def perform(message)
+    puts "Processing: #{message}"
+  end
+end
+
+# Setup store and client
+store = Async::Background::Queue::Store.new(path: "tmp/queue/jobs.db")
+store.ensure_database!
+
+notifier = Async::Background::Queue::Notifier.new
+client   = Async::Background::Queue::Client.new(store: store, notifier: notifier)
+
+Async::Background::Queue.default_client = client
+
+# Enqueue jobs
+MyJob.perform_async("hello")
+MyJob.perform_in(10, "delayed hello")
+MyJob.perform_at(Time.now + 60, "scheduled hello")
+```

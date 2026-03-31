@@ -4,6 +4,8 @@ module Async
   module Background
     module Queue
       class Notifier
+        IO_ERRORS = [IO::WaitReadable, EOFError, IOError].freeze
+
         attr_reader :reader, :writer
 
         def initialize
@@ -51,7 +53,7 @@ module Async
         def drain
           loop do
             @reader.read_nonblock(256)
-          rescue IO::WaitReadable, EOFError
+          rescue *IO_ERRORS
             break
           end
           nil

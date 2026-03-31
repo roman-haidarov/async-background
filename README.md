@@ -6,6 +6,7 @@ A lightweight, production-grade cron/interval scheduler for Ruby's [Async](https
 
 - **Cron & interval scheduling** — single event loop + min-heap, scales to hundreds of jobs
 - **Dynamic job queue** — enqueue jobs at runtime via SQLite, pick up by background workers
+- **Delayed jobs** — schedule jobs for future execution with `perform_in` / `perform_at` (Sidekiq-like API)
 - **Multi-process safe** — deterministic worker sharding via `Zlib.crc32`, no duplicate execution
 - **Skip overlapping** — if a job is still running when its next tick arrives, the tick is skipped
 - **Timeout protection** — per-job configurable timeout via `Async::Task#with_timeout`
@@ -31,7 +32,41 @@ gem "async-utilization", "~> 0.3"  # for metrics
 
 ## ➡️ [Get Started](docs/GET_STARTED.md)
 
-Step-by-step setup guide: schedule config, Falcon integration, Docker, dynamic queue.
+Step-by-step setup guide: schedule config, Falcon integration, Docker, dynamic queue, delayed jobs.
+
+---
+
+## Quick Example: Job Module
+
+Include `Async::Background::Job` for a Sidekiq-like interface:
+
+```ruby
+class SendEmailJob
+  include Async::Background::Job
+
+  def perform(user_id, template)
+    user = User.find(user_id)
+    Mailer.send(user, template)
+  end
+end
+
+# Immediate execution in the queue
+SendEmailJob.perform_async(user_id, "welcome")
+
+# Execute after 5 minutes
+SendEmailJob.perform_in(300, user_id, "reminder")
+
+# Execute at a specific time
+SendEmailJob.perform_at(Time.new(2026, 4, 1, 9, 0, 0), user_id, "scheduled")
+```
+
+Or use the lower-level API directly:
+
+```ruby
+Async::Background::Queue.enqueue(SendEmailJob, user_id, "welcome")
+Async::Background::Queue.enqueue_in(300, SendEmailJob, user_id, "reminder")
+Async::Background::Queue.enqueue_at(Time.new(2026, 4, 1, 9, 0, 0), SendEmailJob, user_id, "scheduled")
+```
 
 ---
 
@@ -64,7 +99,12 @@ store.close  # ← before fork
 
 ### Clock handling
 
-Interval jobs use `CLOCK_MONOTONIC` to avoid NTP drift. Cron jobs use `Time.now` because "every day at 3am" must respect real time. These are different clocks by design.
+The `Clock` module provides shared time helpers used across the codebase:
+
+- **`monotonic_now`** (`CLOCK_MONOTONIC`) — for in-process intervals and durations, immune to NTP drift / wall-clock jumps
+- **`realtime_now`** (`CLOCK_REALTIME`) — for persisted timestamps (SQLite `run_at`, `created_at`, `locked_at`)
+
+Interval jobs use monotonic clock. Cron jobs use `Time.now` because "every day at 3am" must respect real time. These are different clocks by design.
 
 ---
 
@@ -89,11 +129,28 @@ schedule.yml
  run_job             ← timeout, logging, error handling
 ```
 
+### Queue Architecture
+
+```
+Producer (web/console)          Consumer (background worker)
+     │                                │
+     ▼                                ▼
+ Queue::Client                   Queue::Store.fetch
+     │                           (WHERE run_at <= now)
+     ├─ push(class, args, run_at)     │
+     ├─ push_in(delay, class, args)   ▼
+     └─ push_at(time, class, args)  run_queue_job
+     │                                │
+     ▼                                ▼
+ Queue::Store ──── SQLite ──── Queue::Notifier
+ (INSERT job)    (jobs table)    (IO.pipe wakeup)
+```
+
 ## Schedule Config
 
 | Key | Required | Description |
 |---|---|---|
-| `class` | yes | Must respond to `.perform_now` class method |
+| `class` | yes | Must include `Async::Background::Job` |
 | `every` | one of | Interval in seconds between runs |
 | `cron` | one of | Cron expression (parsed by Fugit) |
 | `timeout` | no | Max execution time in seconds (default: 30) |

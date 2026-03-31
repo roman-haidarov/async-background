@@ -1,11 +1,14 @@
 # frozen_string_literal: true
 
 require 'json'
+require_relative '../clock'
 
 module Async
   module Background
     module Queue
       class Store
+        include Clock
+
         SCHEMA = <<~SQL
           PRAGMA auto_vacuum = INCREMENTAL;
           CREATE TABLE IF NOT EXISTS jobs (
@@ -14,10 +17,11 @@ module Async
             args       TEXT    NOT NULL DEFAULT '[]',
             status     TEXT    NOT NULL DEFAULT 'pending',
             created_at REAL    NOT NULL,
+            run_at     REAL    NOT NULL,
             locked_by  INTEGER,
             locked_at  REAL
           );
-          CREATE INDEX IF NOT EXISTS idx_jobs_status_id ON jobs(status, id);
+          CREATE INDEX IF NOT EXISTS idx_jobs_status_run_at_id ON jobs(status, run_at, id);
         SQL
 
         MMAP_SIZE = 268_435_456
@@ -56,16 +60,20 @@ module Async
           @schema_checked = true
         end
 
-        def enqueue(class_name, args = [])
+        def enqueue(class_name, args = [], run_at = nil)
           ensure_connection
-          @enqueue_stmt.execute(class_name, JSON.generate(args), realtime_now)
+          run_at ||= realtime_now
+          @enqueue_stmt.execute(class_name, JSON.generate(args), realtime_now, run_at)
           @db.last_insert_row_id
         end
 
         def fetch(worker_id)
           ensure_connection
+          now = realtime_now
           @db.execute("BEGIN IMMEDIATE")
-          row = @fetch_stmt.execute(worker_id, realtime_now).first
+          results = @fetch_stmt.execute(worker_id, now, now)
+          row = results.first
+          @fetch_stmt.reset!
           @db.execute("COMMIT")
           return unless row
 
@@ -75,7 +83,6 @@ module Async
           @db.execute("ROLLBACK") rescue nil
           raise
         end
-
         def complete(job_id)
           ensure_connection
           @complete_stmt.execute(job_id)
@@ -134,7 +141,7 @@ module Async
 
         def prepare_statements
           @enqueue_stmt = @db.prepare(
-            "INSERT INTO jobs (class_name, args, created_at) VALUES (?, ?, ?)"
+            "INSERT INTO jobs (class_name, args, created_at, run_at) VALUES (?, ?, ?, ?)"
           )
 
           @fetch_stmt = @db.prepare(<<~SQL)
@@ -142,8 +149,8 @@ module Async
             SET    status = 'running', locked_by = ?, locked_at = ?
             WHERE  id = (
               SELECT id FROM jobs
-              WHERE  status = 'pending'
-              ORDER BY id
+              WHERE  status = 'pending' AND run_at <= ?
+              ORDER BY run_at, id
               LIMIT 1
             )
             RETURNING id, class_name, args
@@ -180,13 +187,6 @@ module Async
           end
         end
 
-        def realtime_now
-          Process.clock_gettime(Process::CLOCK_REALTIME)
-        end
-
-        def monotonic_now
-          Process.clock_gettime(Process::CLOCK_MONOTONIC)
-        end
       end
     end
   end
