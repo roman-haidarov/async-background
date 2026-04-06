@@ -1,0 +1,6 @@
+# Minimal schedule for CI scenario workers - must have at least one job
+
+ci_heartbeat:
+  class: CIJobs::HeartbeatJob
+  every: 10
+  timeout: 5

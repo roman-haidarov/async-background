@@ -1,0 +1,5 @@
+---
+test_job:
+  class: TestJob
+  every: 3
+  timeout: 10

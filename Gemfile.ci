@@ -1,0 +1,13 @@
+# frozen_string_literal: true
+
+source 'https://rubygems.org'
+
+gemspec
+
+gem 'sqlite3',           '~> 2.0'
+gem 'async-utilization',  '~> 0.3'
+gem 'async-container',   '~> 0.18'
+
+group :development, :test do
+  gem 'rubocop', '~> 1.0', require: false
+end
