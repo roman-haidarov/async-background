@@ -53,6 +53,7 @@ module Async
         def ensure_database!
           require_sqlite3
           db = SQLite3::Database.new(@path)
+          db.execute('PRAGMA busy_timeout = 5000')
           db.execute_batch(PRAGMAS.call(@mmap ? MMAP_SIZE : 0))
           db.execute_batch(SCHEMA)
           db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -128,6 +129,7 @@ module Async
           require_sqlite3
           finalize_statements
           @db = SQLite3::Database.new(@path)
+          @db.execute('PRAGMA busy_timeout = 5000')
           @db.execute_batch(PRAGMAS.call(@mmap ? MMAP_SIZE : 0))
 
           unless @schema_checked

@@ -32,7 +32,7 @@ jobs:
       - name: Run RSpec
         env:
           BUNDLE_GEMFILE: Gemfile.ci
-        run: bundle exec rspec test/ --format documentation
+        run: bundle exec rspec spec/ --format documentation --color
 
   scenario:
     name: "Scenario test (multi-worker fork)"
