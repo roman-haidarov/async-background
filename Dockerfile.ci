@@ -1,0 +1,20 @@
+# frozen_string_literal: true
+
+FROM ruby:3.3-slim
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      build-essential \
+      libsqlite3-dev \
+      git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /gem
+
+COPY Gemfile Gemfile.ci async-background.gemspec ./
+COPY lib/async/background/version.rb ./lib/async/background/
+RUN bundle install --gemfile=Gemfile.ci --jobs=4
+
+COPY . .
+
+ENV BUNDLE_GEMFILE=Gemfile.ci

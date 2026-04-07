@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.5.1
+
+### Testing Infrastructure
+- **Comprehensive CI setup** — full Docker-based integration testing environment with `Dockerfile.ci`, `docker-compose.ci.yml`, and `Gemfile.ci`
+- **End-to-end scenario testing** — new `ci/scenario_test.rb` validates real-world scenarios with forked workers:
+  - Normal execution of fast/slow/failing jobs across multiple workers
+  - Crash recovery after SIGKILL with automatic job pickup by remaining workers
+  - No duplicate execution guarantees under worker crashes
+  - Proper job distribution validation across worker pool
+- **Test fixtures** — dedicated `ci/fixtures/jobs.rb` and `ci/fixtures/schedule.yml` for scenario testing
+
+### Bug Fixes  
+- **SQLite busy timeout** — added `PRAGMA busy_timeout = 5000` to `Queue::Store` to prevent `SQLITE_BUSY` errors under concurrent multi-process database access
+- **Enhanced Queue::Notifier error handling** — restructured IO error handling with clearer categorization:
+  - `WRITE_DROPPED` for write failures (`IO::WaitWritable`, `Errno::EAGAIN`, `IOError`, `Errno::EPIPE`) — all non-fatal as job is already in store
+  - `READ_EXHAUSTED` for read exhaustion (`IO::WaitReadable`, `EOFError`, `IOError`) — normal drain completion
+  - Added explanatory comments for each error type and handling strategy
+
 ## 0.5.0
 
 ### Features

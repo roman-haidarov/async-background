@@ -1,0 +1,6 @@
+# Scenario schedule for CI workers.
+
+ci_heartbeat:
+  class: CIJobs::HeartbeatJob
+  cron: '0 0 1 1 *'
+  timeout: 5
