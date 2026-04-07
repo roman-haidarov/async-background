@@ -34,6 +34,8 @@ module Async
           # one poll interval.
         end
 
+        alias notify_all notify
+
         def wait(timeout: nil)
           @reader.wait_readable(timeout)
           drain

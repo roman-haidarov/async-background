@@ -5,7 +5,7 @@ require 'spec_helper'
 RSpec.describe 'Queue Integration', type: :integration do
   let(:db_path) { temp_db_path }
   let(:store) { Async::Background::Queue::Store.new(path: db_path) }
-  let(:notifier) { instance_double('Async::Background::Queue::Notifier', notify: nil) }
+  let(:notifier) { instance_double('Async::Background::Queue::Notifier', notify_all: nil) }
   let(:client) { Async::Background::Queue::Client.new(store: store, notifier: notifier) }
 
   let(:test_job_class) do

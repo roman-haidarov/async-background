@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.6.0
+
+### Breaking Changes
+- **Queue notification system completely rewritten** — replaced pipe-based `Notifier` with Unix domain socket-based architecture
+  - `Runner` now takes `queue_socket_dir:` parameter instead of `queue_notifier:`
+  - Removed `Notifier#for_producer!` and `Notifier#for_consumer!` — no longer needed
+  - `Client#push` now calls `notifier.notify_all` instead of `notifier.notify`
+
+### Features
+- **Unix domain socket-based notifications** — solves all cross-process notification problems
+  - New `SocketWaker` class (consumer-side) — each worker listens on its own Unix socket (`/tmp/queue/sockets/async_bg_worker_N.sock`)
+  - New `SocketNotifier` class (producer-side) — connects to all worker sockets to broadcast wake-ups
+  - **Cross-process wake-up now works correctly** — web workers → background workers, background workers → background workers
+  - **Fork-safe by design** — no shared file descriptors, each process creates its own socket after fork
+  - **Resilient to restarts** — stale socket cleanup on worker startup, graceful degradation if worker unavailable
+  - **Sub-100µs latency** — typical wake-up time 30-80µs vs previous 5-second polling fallback
+
+### Bug Fixes
+- **CRITICAL: Notifier bug in recommended setup** — the old pipe-based `Notifier` was fundamentally broken in multi-fork scenarios:
+  - `for_consumer!` closed the writer end in each child process, making `Client#push → notify` fail silently with `IOError`
+  - All writes were caught by `WRITE_DROPPED` rescue block, causing jobs to use 5-second polling instead of instant wake-up
+  - Web workers had no way to notify background workers (no shared pipe after fork)
+  - The bug was masked by `WRITE_DROPPED` silently catching `IOError` — appeared to work but degraded to polling
+- **Socket cleanup race conditions** — `SocketWaker#cleanup_stale_socket` now validates if socket is truly stale by attempting connection
+
+### Improvements
+- Updated `docs/GET_STARTED.md` with new socket-based setup for Falcon
+- Added section on web worker → background worker job enqueuing with full example
+- Changed environment variable from `QUEUE_SOCKET_PATH` to `QUEUE_SOCKET_DIR` (directory instead of single socket path)
+- Better error handling in `SocketWaker` and `SocketNotifier` with comprehensive `UNAVAILABLE` error list
+- Integrated with `Async::Notification` for local wake-ups (shutdown signals)
+
+### Technical Details
+- **Why sockets over pipes?** Pipes require shared FDs across fork boundaries. The recommended Falcon setup calls `for_consumer!` in each child, which closes the writer, breaking the notification chain. Sockets use filesystem paths — any process can connect without inherited FDs.
+- **Performance impact:** Adding ~80µs per enqueue for 8 workers (8 socket connections) vs ~100µs for SQLite transaction = negligible overhead
+- **Graceful degradation:** If worker socket unavailable (`ENOENT`, `ECONNREFUSED`), producer silently skips — job still in database, will be picked up on next poll (5s max delay)
+
 ## 0.5.1
 
 ### Testing Infrastructure

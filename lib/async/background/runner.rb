@@ -19,7 +19,7 @@ module Async
 
       def initialize(
         config_path:, job_count: 2, worker_index:, total_workers:,
-        queue_notifier: nil, queue_db_path: nil, queue_mmap: true
+        queue_socket_dir: nil, queue_db_path: nil, queue_mmap: true
       )
         @logger        = Console.logger
         @worker_index  = worker_index
@@ -33,7 +33,7 @@ module Async
         @semaphore = ::Async::Semaphore.new(job_count)
         @heap      = build_heap(config_path)
 
-        setup_queue(queue_notifier, queue_db_path, queue_mmap)
+        setup_queue(queue_socket_dir, queue_db_path, queue_mmap)
       end
 
       def run
@@ -46,6 +46,7 @@ module Async
 
           semaphore.acquire {}
           @queue_store&.close
+          @queue_waker&.close
         end
       end
 
@@ -55,7 +56,7 @@ module Async
         @running = false
         logger.info { "Async::Background: stopping gracefully" }
         shutdown.signal
-        @queue_notifier&.notify
+        @queue_waker&.signal
       end
 
       def running?
@@ -64,35 +65,40 @@ module Async
 
       private
 
-      def setup_queue(queue_notifier, queue_db_path, queue_mmap)
+      def setup_queue(queue_socket_dir, queue_db_path, queue_mmap)
         @listen_queue = false
-        return unless queue_notifier
+        return unless queue_socket_dir
 
         # Lazy require — only loaded when queue is actually used
         require_relative 'queue/store'
-        require_relative 'queue/notifier'
+        require_relative 'queue/socket_waker'
         require_relative 'queue/client'
 
         isolated = ENV.fetch("ISOLATION_FORKS", "").split(",").map(&:to_i)
         return if isolated.include?(worker_index)
 
-        @listen_queue   = true
-        @queue_notifier = queue_notifier
-        @queue_store    = Queue::Store.new(
+        @listen_queue = true
+        @queue_store  = Queue::Store.new(
           path: queue_db_path || Queue::Store.default_path,
           mmap: queue_mmap
         )
+
+        socket_path = File.join(queue_socket_dir, "async_bg_worker_#{worker_index}.sock")
+        @queue_waker = Queue::SocketWaker.new(socket_path)
+        @queue_waker.open!
 
         recovered = @queue_store.recover(worker_index)
         logger.info { "Async::Background queue: recovered #{recovered} stale jobs" } if recovered > 0
       end
 
       def start_queue_listener(task)
+        @queue_waker.start_accept_loop(task)
+
         task.async do
           logger.info { "Async::Background queue: listening on worker #{worker_index}" }
 
           while running?
-            @queue_notifier.wait(timeout: QUEUE_POLL_INTERVAL)
+            @queue_waker.wait(timeout: QUEUE_POLL_INTERVAL)
 
             while running?
               job = @queue_store.fetch(worker_index)
@@ -196,7 +202,7 @@ module Async
             @signal_r.wait_readable
             @signal_r.read_nonblock(256) rescue nil
             shutdown.signal
-            @queue_notifier&.notify
+            @queue_waker&.signal
             break unless running?
           end
         end
