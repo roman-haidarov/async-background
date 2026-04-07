@@ -1,0 +1,32 @@
+version: "3.8"
+services:
+  unit:
+    build:
+      context: .
+      dockerfile: Dockerfile.ci
+    command: bundle exec rspec spec/ --format documentation
+    environment:
+      BUNDLE_GEMFILE: Gemfile.ci
+    volumes:
+      - tmp-unit:/gem/tmp
+    tmpfs:
+      - /tmp:size=64M
+
+  scenario:
+    build:
+      context: .
+      dockerfile: Dockerfile.ci
+    command: bundle exec ruby ci/scenario_test.rb
+    environment:
+      BUNDLE_GEMFILE: Gemfile.ci
+      SCENARIO_WORKERS: "3"
+      SCENARIO_JOBS: "200"
+      SCENARIO_TIMEOUT: "60"
+    volumes:
+      - tmp-scenario:/gem/tmp
+    tmpfs:
+      - /tmp:size=64M
+
+volumes:
+  tmp-unit:
+  tmp-scenario:

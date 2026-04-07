@@ -2,42 +2,58 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+    branches: [main]
+
+permissions:
+  contents: read
 
 jobs:
-  build:
-    runs-on: ${{ matrix.os }}
+  unit:
+    name: "Unit & Integration tests"
+    runs-on: ubuntu-latest
+
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
         ruby: ['3.3', '3.4']
 
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Set up Ruby
-      uses: ruby/setup-ruby@v1
-      with:
-        ruby-version: ${{ matrix.ruby }}
-        bundler-cache: true
+      - uses: ruby/setup-ruby@v1
+        env:
+          BUNDLE_GEMFILE: Gemfile.ci
+        with:
+          ruby-version: ${{ matrix.ruby }}
+          bundler-cache: true
 
-    - name: Check syntax
-      run: |
-        echo "Checking Ruby syntax..."
-        find lib -name "*.rb" -exec ruby -c {} \;
+      - name: Run RSpec
+        env:
+          BUNDLE_GEMFILE: Gemfile.ci
+        run: bundle exec rspec spec/ --format documentation --color
 
-    - name: Build gem
-      run: |
-        echo "Building gem..."
-        gem build async-background.gemspec
-        ls -la *.gem
-        echo "✓ Gem built successfully on Ruby ${{ matrix.ruby }}"
+  scenario:
+    name: "Scenario test (multi-worker fork)"
+    needs: unit
+    runs-on: ubuntu-latest
 
-    - name: Verify gem contents
-      run: |
-        echo "Checking gem contents..."
-        gem specification async-background-*.gem
-        echo "✓ Gem contents verified"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build CI image
+        run: docker compose -f docker-compose.ci.yml build scenario
+
+      - name: Run scenario test
+        run: |
+          docker compose -f docker-compose.ci.yml run \
+            --rm \
+            -e SCENARIO_WORKERS=3 \
+            -e SCENARIO_JOBS=200 \
+            -e SCENARIO_TIMEOUT=60 \
+            scenario
+
+      - name: Cleanup
+        if: always()
+        run: docker compose -f docker-compose.ci.yml down -v

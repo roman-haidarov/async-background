@@ -4,7 +4,19 @@ module Async
   module Background
     module Queue
       class Notifier
-        IO_ERRORS = [IO::WaitReadable, EOFError, IOError].freeze
+        #  Error groups
+        WRITE_DROPPED = [
+          IO::WaitWritable,  # buffer full — consumer is behind, skip
+          Errno::EAGAIN,     # same as above on some platforms
+          IOError,           # our own writer end has been closed
+          Errno::EPIPE       # the reader end is gone (consumer crashed) — skip
+        ].freeze
+
+        READ_EXHAUSTED = [
+          IO::WaitReadable,  # nothing left in the buffer — normal exit
+          EOFError,          # writer end closed — no more data ever
+          IOError            # our own reader end has been closed
+        ].freeze
 
         attr_reader :reader, :writer
 
@@ -16,10 +28,10 @@ module Async
 
         def notify
           @writer.write_nonblock("\x01")
-        rescue IO::WaitWritable, Errno::EAGAIN
-          # pipe buffer full — consumer is already behind, skip
-        rescue IOError
-          # pipe closed
+        rescue *WRITE_DROPPED
+          # All write failures are non-fatal: the job is already in the
+          # store, and missing one wake-up only delays pickup by at most
+          # one poll interval.
         end
 
         def wait(timeout: nil)
@@ -53,7 +65,7 @@ module Async
         def drain
           loop do
             @reader.read_nonblock(256)
-          rescue *IO_ERRORS
+          rescue *READ_EXHAUSTED
             break
           end
           nil

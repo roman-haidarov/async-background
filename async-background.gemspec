@@ -6,43 +6,38 @@ Gem::Specification.new do |spec|
   spec.name    = 'async-background'
   spec.version = Async::Background::VERSION
   spec.authors = ['Roman Hajdarov']
-  spec.email = ['romnhajdarov@gmail.com']
+  spec.email   = ['romnhajdarov@gmail.com']
 
   spec.summary     = 'Lightweight heap-based cron/interval scheduler for Async.'
-  spec.description = 'A production-grade lightweight scheduler built on top of Async. Single event loop with min-heap timer, skip-overlapping execution, jitter, monotonic clock intervals, semaphore concurrency control, and deterministic worker sharding. Designed for Falcon but works with any Async-based application.'
+  spec.description = 'A production-grade lightweight scheduler built on top of Async. ' \
+                     'Single event loop with min-heap timer, skip-overlapping execution, ' \
+                     'jitter, monotonic clock intervals, semaphore concurrency control, ' \
+                     'and deterministic worker sharding. Designed for Falcon but works ' \
+                     'with any Async-based application.'
 
   spec.homepage = 'https://github.com/roman-haidarov/async-background'
   spec.license  = 'MIT'
 
   spec.metadata = {
     'source_code_uri' => 'https://github.com/roman-haidarov/async-background',
-    'changelog_uri' => 'https://github.com/roman-haidarov/async-background/blob/main/CHANGELOG.md',
+    'changelog_uri'   => 'https://github.com/roman-haidarov/async-background/blob/main/CHANGELOG.md',
     'bug_tracker_uri' => 'https://github.com/roman-haidarov/async-background/issues'
   }
 
-  spec.files = Dir.glob('{lib}/**/*', File::FNM_DOTMATCH, base: __dir__)
+  spec.files         = Dir.glob('lib/**/*', base: __dir__) +
+                       %w[README.md CHANGELOG.md LICENSE async-background.gemspec]
+  spec.require_paths = ['lib']
 
-  # Ruby 3.3+ required:
-  # - Fiber Scheduler landed in 3.0 but had critical bugs
-  # - Async 2.x requires 3.1+ (io-event dependency)
-  # - autoload bugs in 3.1 fixed in 3.2
-  # - io-event >= 1.14 requires Ruby 3.3+
-  # - Falcon itself requires >= 3.2
-  # - Samuel Williams (Async author): "3.2 is the first production-ready release"
   spec.required_ruby_version = '>= 3.3'
 
-  # Runtime dependencies — pinned to known-good major versions
-  spec.add_dependency 'async',    '~> 2.0'   # Fiber Scheduler-based, requires Ruby 3.1+
-  spec.add_dependency 'console',  '~> 1.0'   # Structured logging (ships with Async ecosystem)
-  spec.add_dependency 'fugit',    '~> 1.0'   # Cron expression parsing (based on et-orbi + raabro)
+  spec.add_dependency 'async',   '~> 2.0'
+  spec.add_dependency 'console', '~> 1.0'
+  spec.add_dependency 'fugit',   '~> 1.0'
 
-  # Optional dependencies for enhanced features:
-  # - sqlite3: Required for dynamic job queue (Queue module)
-  #   Add to your Gemfile: gem "sqlite3", "~> 2.0"
-  # - async-utilization: Enables shared memory metrics collection across workers
-  #   Add to your Gemfile: gem "async-utilization", "~> 0.3"
+  # Optional: add to your own Gemfile if you need these features
+  #   gem 'sqlite3',          '~> 2.0'  # dynamic job queue
+  #   gem 'async-utilization', '~> 0.3' # shared-memory worker metrics
 
-  # Development dependencies
-  spec.add_development_dependency 'rake',    '~> 13.0'
-  spec.add_development_dependency 'rspec',   '~> 3.12'
+  spec.add_development_dependency 'rake',  '~> 13.0'
+  spec.add_development_dependency 'rspec', '~> 3.12'
 end
