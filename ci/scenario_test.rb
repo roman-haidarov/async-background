@@ -23,7 +23,6 @@ require 'async/background'
 require 'async/background/job'
 require 'async/background/queue/store'
 require 'async/background/queue/client'
-require 'async/background/queue/notifier'
 require 'console'
 require 'fileutils'
 require 'json'
@@ -47,9 +46,10 @@ module ScenarioTest
     WORKER_STARTUP_TIMEOUT = 10
     POLL_INTERVAL          = 0.5
 
-    QUEUE_DB_PATH = File.expand_path('../tmp/ci_queue.db', __dir__)
-    LEDGER_PATH   = File.expand_path('../tmp/ci_ledger.log', __dir__)
-    SCHEDULE_PATH = File.expand_path('fixtures/schedule.yml', __dir__)
+    QUEUE_DB_PATH   = File.expand_path('../tmp/ci_queue.db', __dir__)
+    SOCKET_DIR      = File.expand_path('../tmp/ci_sockets', __dir__)
+    LEDGER_PATH     = File.expand_path('../tmp/ci_ledger.log', __dir__)
+    SCHEDULE_PATH   = File.expand_path('fixtures/schedule.yml', __dir__)
 
     FAST_COUNT    = (TOTAL_JOBS * 0.7).to_i
     SLOW_COUNT    = (TOTAL_JOBS * 0.2).to_i
@@ -114,8 +114,8 @@ module ScenarioTest
 
     attr_reader :total_workers
 
-    def initialize(notifier:, total_workers:)
-      @notifier      = notifier
+    def initialize(socket_dir:, total_workers:)
+      @socket_dir    = socket_dir
       @workers       = []
       @total_workers = total_workers
     end
@@ -125,7 +125,6 @@ module ScenarioTest
         spawn_worker(index)
         sleep(0.05) if index < @total_workers
       end
-      @notifier.for_producer!
       wait_until_all_alive!
     end
 
@@ -190,16 +189,14 @@ module ScenarioTest
 
     def spawn_worker(index)
       pid = fork do
-        @notifier.for_consumer!
-
         runner = Async::Background::Runner.new(
-          config_path:    Config::SCHEDULE_PATH,
-          job_count:      5,
-          worker_index:   index,
-          total_workers:  @total_workers,
-          queue_notifier: @notifier,
-          queue_db_path:  Config::QUEUE_DB_PATH,
-          queue_mmap:     true
+          config_path:      Config::SCHEDULE_PATH,
+          job_count:        5,
+          worker_index:     index,
+          total_workers:    @total_workers,
+          queue_socket_dir: @socket_dir,
+          queue_db_path:    Config::QUEUE_DB_PATH,
+          queue_mmap:       true
         )
 
         Signal.trap('TERM') { runner.stop }
@@ -414,11 +411,10 @@ module ScenarioTest
 
       setup_clean_state!
 
-      notifier = Async::Background::Queue::Notifier.new
-      pool     = WorkerPool.new(notifier: notifier, total_workers: Config::TOTAL_WORKERS)
+      pool = WorkerPool.new(socket_dir: Config::SOCKET_DIR, total_workers: Config::TOTAL_WORKERS)
       pool.start_initial_cohort!
 
-      enqueue_normal_jobs(notifier)
+      enqueue_normal_jobs
       wait_for_completion(Config::TOTAL_JOBS, Config::SCENARIO_TIMEOUT)
 
       pool.stop_gracefully!
@@ -434,7 +430,6 @@ module ScenarioTest
 
       errors = validator.validate_normal_scenario
       inspector.close
-      notifier.close
 
       report_scenario_result('normal', errors)
     rescue => e
@@ -448,11 +443,10 @@ module ScenarioTest
 
       setup_clean_state!
 
-      notifier = Async::Background::Queue::Notifier.new
-      pool     = WorkerPool.new(notifier: notifier, total_workers: Config::TOTAL_WORKERS)
+      pool = WorkerPool.new(socket_dir: Config::SOCKET_DIR, total_workers: Config::TOTAL_WORKERS)
       pool.start_initial_cohort!
 
-      enqueue_recovery_jobs(notifier)
+      enqueue_recovery_jobs
 
       sleep(Config::RECOVERY_SLEEP / 2.0)
 
@@ -477,7 +471,6 @@ module ScenarioTest
 
       errors = validator.validate_recovery_scenario(killed_worker_index: killed_index)
       inspector.close
-      notifier.close
 
       report_scenario_result('recovery', errors)
     rescue => e
@@ -488,8 +481,10 @@ module ScenarioTest
 
     def setup_clean_state!
       FileUtils.mkdir_p(File.dirname(Config::QUEUE_DB_PATH))
+      FileUtils.mkdir_p(Config::SOCKET_DIR)
       FileUtils.mkdir_p(File.dirname(Config::LEDGER_PATH))
       FileUtils.rm_f(Dir.glob("#{Config::QUEUE_DB_PATH}*"))
+      FileUtils.rm_f(Dir.glob("#{Config::SOCKET_DIR}/*.sock"))
       FileUtils.rm_f(Config::LEDGER_PATH)
 
       store = Async::Background::Queue::Store.new(path: Config::QUEUE_DB_PATH)
@@ -503,8 +498,14 @@ module ScenarioTest
       Log.info("ledger:   #{Config::LEDGER_PATH}")
     end
 
-    def enqueue_normal_jobs(notifier)
-      store  = Async::Background::Queue::Store.new(path: Config::QUEUE_DB_PATH)
+    def enqueue_normal_jobs
+      require_relative '../lib/async/background/queue/socket_notifier'
+      
+      store    = Async::Background::Queue::Store.new(path: Config::QUEUE_DB_PATH)
+      notifier = Async::Background::Queue::SocketNotifier.new(
+        socket_dir: Config::SOCKET_DIR,
+        total_workers: Config::TOTAL_WORKERS
+      )
       client = Async::Background::Queue::Client.new(store: store, notifier: notifier)
       Async::Background::Queue.default_client = client
 
@@ -528,8 +529,14 @@ module ScenarioTest
       store.close
     end
 
-    def enqueue_recovery_jobs(notifier)
-      store  = Async::Background::Queue::Store.new(path: Config::QUEUE_DB_PATH)
+    def enqueue_recovery_jobs
+      require_relative '../lib/async/background/queue/socket_notifier'
+
+      store    = Async::Background::Queue::Store.new(path: Config::QUEUE_DB_PATH)
+      notifier = Async::Background::Queue::SocketNotifier.new(
+        socket_dir: Config::SOCKET_DIR,
+        total_workers: Config::TOTAL_WORKERS
+      )
       client = Async::Background::Queue::Client.new(store: store, notifier: notifier)
       Async::Background::Queue.default_client = client
 

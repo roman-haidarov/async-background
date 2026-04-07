@@ -67,14 +67,13 @@ if ENV.fetch("BACKGROUND_FORKS", 0).to_i > 0
     service_class do
       Class.new(Async::Service::Generic) do
         def setup(container)
-          require "async/background/queue/notifier"
           require "async/background/queue/store"
           require "async/background/queue/client"
+          require "async/background/queue/socket_notifier"
 
-          total   = ENV.fetch("BACKGROUND_FORKS", 2).to_i
-          db_path = ENV.fetch("QUEUE_DB_PATH", "/app/tmp/queue/background.db")
-
-          queue_notifier = Async::Background::Queue::Notifier.new
+          total       = ENV.fetch("BACKGROUND_FORKS", 2).to_i
+          db_path     = ENV.fetch("QUEUE_DB_PATH", "/app/tmp/queue/background.db")
+          socket_dir  = ENV.fetch("QUEUE_SOCKET_DIR", "/app/tmp/queue/sockets")
 
           # Pre-fork: create schema only, then close.
           # SQLite connections must NOT survive across fork().
@@ -82,27 +81,29 @@ if ENV.fetch("BACKGROUND_FORKS", 0).to_i > 0
           store.ensure_database!
           store.close
 
-          Async::Background::Queue.default_client = nil
-
           total.times do |i|
             container.run(count: 1, restart: true) do |instance|
               require_relative "config/environment"
               require "async/background"
 
-              queue_notifier.for_consumer!
               instance.ready!
 
               runner = Async::Background::Runner.new(
-                config_path:    Rails.root.join("config/schedule.yml"),
-                job_count:      ENV.fetch("LIMIT_JOB_COUNT", 2).to_i,
-                worker_index:   i + 1,
-                total_workers:  total,
-                queue_notifier: queue_notifier,
-                queue_db_path:  db_path
+                config_path:      Rails.root.join("config/schedule.yml"),
+                job_count:        ENV.fetch("LIMIT_JOB_COUNT", 2).to_i,
+                worker_index:     i + 1,
+                total_workers:    total,
+                queue_socket_dir: socket_dir,
+                queue_db_path:    db_path
               )
 
+              # Client uses SocketNotifier to wake up all workers via Unix sockets
               Async::Background::Queue.default_client = Async::Background::Queue::Client.new(
-                store: runner.queue_store, notifier: queue_notifier
+                store: runner.queue_store,
+                notifier: Async::Background::Queue::SocketNotifier.new(
+                  socket_dir: socket_dir,
+                  total_workers: total
+                )
               )
 
               runner.run
@@ -123,6 +124,7 @@ Environment variables:
 | `BACKGROUND_FORKS` | 0 | Number of background scheduler processes (0 = disabled) |
 | `LIMIT_JOB_COUNT` | 2 | Max concurrent jobs per worker |
 | `QUEUE_DB_PATH` | `/app/tmp/queue/background.db` | Path to SQLite database |
+| `QUEUE_SOCKET_DIR` | `/app/tmp/queue/sockets` | Directory for Unix domain sockets (cross-process notifications) |
 | `ISOLATION_FORKS` | (empty) | Comma-separated worker indices to exclude from queue (e.g. `1,3`) |
 
 ---
@@ -255,6 +257,66 @@ Exclude specific workers from queue processing:
 # Workers 1 and 3 only run scheduled cron/interval jobs
 ISOLATION_FORKS=1,3
 ```
+
+### Enqueuing from Web Workers
+
+Web workers (HTTP servers) can also enqueue jobs to background workers. Simply configure the `default_client` in your web service:
+
+```ruby
+service "web" do
+  include Falcon::Environment::Rack
+  
+  count ENV.fetch("FORKS", 2).to_i
+  
+  service_class do
+    Class.new(Async::Service::Generic) do
+      def setup(container)
+        require "async/background/queue/store"
+        require "async/background/queue/client"
+        require "async/background/queue/socket_notifier"
+        
+        total       = ENV.fetch("BACKGROUND_FORKS", 2).to_i
+        db_path     = ENV.fetch("QUEUE_DB_PATH", "/app/tmp/queue/background.db")
+        socket_dir  = ENV.fetch("QUEUE_SOCKET_DIR", "/app/tmp/queue/sockets")
+        
+        container.run(count: ENV.fetch("FORKS", 2).to_i) do |instance|
+          require_relative "config/environment"
+          
+          # Web workers can enqueue and wake up background workers
+          store = Async::Background::Queue::Store.new(path: db_path)
+          Async::Background::Queue.default_client = Async::Background::Queue::Client.new(
+            store: store,
+            notifier: Async::Background::Queue::SocketNotifier.new(
+              socket_dir: socket_dir,
+              total_workers: total
+            )
+          )
+          
+          instance.ready!
+          # ... start Falcon HTTP server ...
+        end
+      end
+    end
+  end
+end
+```
+
+Now your Rails controllers can enqueue jobs:
+
+```ruby
+class UsersController < ApplicationController
+  def create
+    @user = User.create!(user_params)
+    
+    # Enqueue welcome email - background workers will pick it up instantly
+    SendEmailJob.perform_async(@user.id, "welcome")
+    
+    redirect_to @user
+  end
+end
+```
+
+**Cross-process wake-up:** When a web worker enqueues a job, `SocketNotifier` sends a wake-up signal to all background workers via Unix domain sockets. Workers receive the notification in ~30-80µs (instead of waiting up to 5 seconds for the next poll).
 
 ---
 

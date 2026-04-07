@@ -15,7 +15,7 @@ module Async
 
         def push(class_name, args = [], run_at = nil)
           id = @store.enqueue(class_name, args, run_at)
-          @notifier&.notify
+          @notifier&.notify_all
           id
         end
 
