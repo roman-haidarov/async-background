@@ -67,7 +67,7 @@ RSpec.describe Async::Background::Queue::Store, type: :unit do
       )
       index_names = indexes.map { |idx| idx[0] }
 
-      expect(index_names).to include('idx_jobs_status_run_at_id')
+      expect(index_names).to include('idx_jobs_pending')
     end
   end
 

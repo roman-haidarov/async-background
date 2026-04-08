@@ -170,13 +170,16 @@ module Async
             if entry.running
               logger.warn('Async::Background') { "#{entry.name}: skipped, previous run still active" }
               metrics.job_skipped(entry)
-            else
-              entry.running = true
-              semaphore.async do |job_task|
-                run_job(job_task, entry)
-              ensure
-                entry.running = false
-              end
+              entry.reschedule(monotonic_now)
+              heap.replace_top(entry)
+              next
+            end
+
+            entry.running = true
+            semaphore.async do |job_task|
+              run_job(job_task, entry)
+            ensure
+              entry.running = false
             end
 
             entry.reschedule(monotonic_now)

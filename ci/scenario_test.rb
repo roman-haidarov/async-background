@@ -8,16 +8,24 @@
 # that unit tests can't cover (exit codes, multi-worker distribution,
 # crash recovery, no-duplicate-execution guarantees).
 #
-# Two scenarios run in sequence:
-#   1. `normal`   — enqueue fast/slow/failing jobs, verify everything
-#                   completed exactly once, each worker did work, and
-#                   all workers exited cleanly.
-#   2. `recovery` — enqueue long-running jobs, SIGKILL one worker
-#                   mid-execution, verify the remaining workers picked
-#                   up and completed the killed worker's jobs (i.e. the
-#                   store.recover path actually works end-to-end).
+# Four scenarios run in sequence:
+#   1. `normal`        — enqueue fast/slow/failing jobs, verify everything
+#                        completed exactly once, each worker did work, and
+#                        all workers exited cleanly.
+#   2. `recovery`      — enqueue long-running jobs, SIGKILL one worker
+#                        mid-execution, verify the remaining workers picked
+#                        up and completed the killed worker's jobs.
+#   3. `enqueue_perf`  — high-rate enqueue stress test. Regression guard
+#                        for the SocketNotifier hot-path fix in 0.6.1:
+#                        ensures bulk enqueue does not block the caller
+#                        AND that workers actually wake up promptly
+#                        (drain time should be << total_jobs / poll).
+#   4. `overlap`       — scheduler regression guard for the skip-branch
+#                        reschedule fix in 0.6.1: a job with `every: 1`
+#                        that sleeps 3s must run roughly every 3s, NOT
+#                        busy-loop every 100ms with skipped warnings.
 #
-# Exit code is 0 iff both scenarios pass.
+# Exit code is 0 iff all scenarios pass.
 
 require 'async/background'
 require 'async/background/job'
@@ -43,13 +51,22 @@ module ScenarioTest
     RECOVERY_TIMEOUT  = ENV.fetch('RECOVERY_TIMEOUT', '30').to_i
     RECOVERY_SLEEP    = ENV.fetch('RECOVERY_SLEEP', '2').to_f
 
+    PERF_JOBS                  = ENV.fetch('PERF_JOBS', '1000').to_i
+    PERF_ENQUEUE_BUDGET        = ENV.fetch('PERF_ENQUEUE_BUDGET', '2.0').to_f
+    PERF_DRAIN_TIMEOUT         = ENV.fetch('PERF_DRAIN_TIMEOUT', '60').to_i
+    OVERLAP_OBSERVE_SECONDS    = ENV.fetch('OVERLAP_OBSERVE_SECONDS', '10').to_f
+    OVERLAP_JOB_DURATION       = ENV.fetch('OVERLAP_JOB_DURATION', '3').to_f
+    OVERLAP_INTERVAL           = ENV.fetch('OVERLAP_INTERVAL', '1').to_i
+    OVERLAP_MAX_STARTS         = ENV.fetch('OVERLAP_MAX_STARTS', '8').to_i
+
     WORKER_STARTUP_TIMEOUT = 10
     POLL_INTERVAL          = 0.5
 
-    QUEUE_DB_PATH   = File.expand_path('../tmp/ci_queue.db', __dir__)
-    SOCKET_DIR      = File.expand_path('../tmp/ci_sockets', __dir__)
-    LEDGER_PATH     = File.expand_path('../tmp/ci_ledger.log', __dir__)
-    SCHEDULE_PATH   = File.expand_path('fixtures/schedule.yml', __dir__)
+    QUEUE_DB_PATH        = File.expand_path('../tmp/ci_queue.db', __dir__)
+    SOCKET_DIR           = File.expand_path('../tmp/ci_sockets', __dir__)
+    LEDGER_PATH          = File.expand_path('../tmp/ci_ledger.log', __dir__)
+    SCHEDULE_PATH        = File.expand_path('fixtures/schedule.yml', __dir__)
+    OVERLAP_SCHEDULE_PATH = File.expand_path('../tmp/ci_overlap_schedule.yml', __dir__)
 
     FAST_COUNT    = (TOTAL_JOBS * 0.7).to_i
     SLOW_COUNT    = (TOTAL_JOBS * 0.2).to_i
@@ -114,8 +131,9 @@ module ScenarioTest
 
     attr_reader :total_workers
 
-    def initialize(socket_dir:, total_workers:)
+    def initialize(socket_dir:, total_workers:, schedule_path: Config::SCHEDULE_PATH)
       @socket_dir    = socket_dir
+      @schedule_path = schedule_path
       @workers       = []
       @total_workers = total_workers
     end
@@ -190,7 +208,7 @@ module ScenarioTest
     def spawn_worker(index)
       pid = fork do
         runner = Async::Background::Runner.new(
-          config_path:      Config::SCHEDULE_PATH,
+          config_path:      @schedule_path,
           job_count:        5,
           worker_index:     index,
           total_workers:    @total_workers,
@@ -263,6 +281,15 @@ module ScenarioTest
       errors.concat(check_ledger_matches_queue)
       errors.concat(check_ledger_not_corrupted)
       errors.concat(check_recovery_worker_exit(killed_worker_index))
+      errors
+    end
+
+    def validate_perf_scenario
+      errors = []
+      errors.concat(check_queue_state)
+      errors.concat(check_no_duplicate_executions)
+      errors.concat(check_ledger_not_corrupted)
+      errors.concat(check_worker_exit_codes)
       errors
     end
 
@@ -391,8 +418,10 @@ module ScenarioTest
 
     def run_all!
       results = {}
-      results[:normal]   = run_normal_scenario
-      results[:recovery] = run_recovery_scenario
+      results[:normal]       = run_normal_scenario
+      results[:recovery]     = run_recovery_scenario
+      results[:enqueue_perf] = run_enqueue_perf_scenario
+      results[:overlap]      = run_overlap_scenario
 
       if results.values.all?
         Log.header('✅ ALL SCENARIOS PASSED')
@@ -479,6 +508,88 @@ module ScenarioTest
       false
     end
 
+    def run_enqueue_perf_scenario
+      Log.header("SCENARIO 3: ENQUEUE PERF (#{Config::PERF_JOBS} jobs, budget #{Config::PERF_ENQUEUE_BUDGET}s)")
+
+      setup_clean_state!
+
+      pool = WorkerPool.new(socket_dir: Config::SOCKET_DIR, total_workers: Config::TOTAL_WORKERS)
+      pool.start_initial_cohort!
+
+      sleep(0.5)
+
+      enqueue_duration = enqueue_perf_jobs
+
+      perf_errors = []
+      if enqueue_duration > Config::PERF_ENQUEUE_BUDGET
+        perf_errors << "enqueue took #{enqueue_duration.round(3)}s, budget #{Config::PERF_ENQUEUE_BUDGET}s " \
+                       "(possible SocketNotifier regression — broadcast on hot path?)"
+      else
+        Log.ok("enqueue stayed within budget: #{enqueue_duration.round(3)}s ≤ #{Config::PERF_ENQUEUE_BUDGET}s")
+      end
+
+      drain_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      wait_for_completion(Config::PERF_JOBS, Config::PERF_DRAIN_TIMEOUT)
+      drain_duration = Process.clock_gettime(Process::CLOCK_MONOTONIC) - drain_start
+
+      drain_ceiling = [Config::PERF_JOBS / 50.0, 5.0].max
+      if drain_duration > drain_ceiling
+        perf_errors << "drain took #{drain_duration.round(2)}s, expected ≤ #{drain_ceiling.round(2)}s " \
+                       "(possible wake-up delivery regression — workers polling instead?)"
+      else
+        Log.ok("drain completed in #{drain_duration.round(2)}s (ceiling #{drain_ceiling.round(2)}s)")
+      end
+
+      pool.stop_gracefully!
+
+      inspector = QueueInspector.new(Config::QUEUE_DB_PATH)
+      validator = Validator.new(
+        inspector:       inspector,
+        pool:            pool,
+        expected_done:   Config::PERF_JOBS,
+        expected_failed: 0,
+        expected_total:  Config::PERF_JOBS
+      )
+
+      errors = perf_errors + validator.validate_perf_scenario
+      inspector.close
+
+      report_scenario_result('enqueue_perf', errors)
+    rescue => e
+      Log.error("enqueue_perf scenario crashed: #{e.class}: #{e.message}")
+      e.backtrace.first(10).each { |line| Log.error("  #{line}") }
+      false
+    end
+
+    def run_overlap_scenario
+      Log.header("SCENARIO 4: OVERLAP (every: #{Config::OVERLAP_INTERVAL}s, sleeps #{Config::OVERLAP_JOB_DURATION}s)")
+
+      setup_clean_state!
+      write_overlap_schedule!
+
+      ENV['OVERLAP_JOB_DURATION'] = Config::OVERLAP_JOB_DURATION.to_s
+
+      pool = WorkerPool.new(
+        socket_dir:    Config::SOCKET_DIR,
+        total_workers: 1,
+        schedule_path: Config::OVERLAP_SCHEDULE_PATH
+      )
+      pool.start_initial_cohort!
+
+      Log.info("observing for #{Config::OVERLAP_OBSERVE_SECONDS}s …")
+      sleep(Config::OVERLAP_OBSERVE_SECONDS)
+
+      pool.stop_gracefully!
+
+      errors = validate_overlap_ledger(pool)
+
+      report_scenario_result('overlap', errors)
+    rescue => e
+      Log.error("overlap scenario crashed: #{e.class}: #{e.message}")
+      e.backtrace.first(10).each { |line| Log.error("  #{line}") }
+      false
+    end
+
     def setup_clean_state!
       FileUtils.mkdir_p(File.dirname(Config::QUEUE_DB_PATH))
       FileUtils.mkdir_p(Config::SOCKET_DIR)
@@ -498,17 +609,34 @@ module ScenarioTest
       Log.info("ledger:   #{Config::LEDGER_PATH}")
     end
 
-    def enqueue_normal_jobs
+    def write_overlap_schedule!
+      yaml = <<~YAML
+        overlap_test:
+          class: CIJobs::OverlapJob
+          every: #{Config::OVERLAP_INTERVAL}
+          timeout: #{(Config::OVERLAP_JOB_DURATION * 3).to_i}
+          worker: 1
+      YAML
+      FileUtils.mkdir_p(File.dirname(Config::OVERLAP_SCHEDULE_PATH))
+      File.write(Config::OVERLAP_SCHEDULE_PATH, yaml)
+      Log.info("overlap schedule: #{Config::OVERLAP_SCHEDULE_PATH}")
+    end
+
+    def build_client
       require_relative '../lib/async/background/queue/socket_notifier'
-      
+
       store    = Async::Background::Queue::Store.new(path: Config::QUEUE_DB_PATH)
       notifier = Async::Background::Queue::SocketNotifier.new(
-        socket_dir: Config::SOCKET_DIR,
+        socket_dir:    Config::SOCKET_DIR,
         total_workers: Config::TOTAL_WORKERS
       )
       client = Async::Background::Queue::Client.new(store: store, notifier: notifier)
       Async::Background::Queue.default_client = client
+      store
+    end
 
+    def enqueue_normal_jobs
+      store = build_client
       t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 
       job_plan = [
@@ -530,15 +658,7 @@ module ScenarioTest
     end
 
     def enqueue_recovery_jobs
-      require_relative '../lib/async/background/queue/socket_notifier'
-
-      store    = Async::Background::Queue::Store.new(path: Config::QUEUE_DB_PATH)
-      notifier = Async::Background::Queue::SocketNotifier.new(
-        socket_dir: Config::SOCKET_DIR,
-        total_workers: Config::TOTAL_WORKERS
-      )
-      client = Async::Background::Queue::Client.new(store: store, notifier: notifier)
-      Async::Background::Queue.default_client = client
+      store = build_client
 
       (1..Config::RECOVERY_JOBS).each do |i|
         CIJobs::RecoveryTestJob.perform_async(i)
@@ -546,6 +666,55 @@ module ScenarioTest
       Log.ok("enqueued #{Config::RECOVERY_JOBS} recovery jobs (each sleeps #{Config::RECOVERY_SLEEP}s)")
 
       store.close
+    end
+
+    def enqueue_perf_jobs
+      store = build_client
+
+      t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      (1..Config::PERF_JOBS).each do |i|
+        CIJobs::FastJob.perform_async(i)
+      end
+      duration = Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0
+
+      Log.ok("enqueued #{Config::PERF_JOBS} jobs in #{duration.round(3)}s " \
+             "(#{(Config::PERF_JOBS / duration).round(0)}/s)")
+
+      store.close
+      duration
+    end
+
+    def validate_overlap_ledger(pool)
+      errors = []
+      ledger = CIJobs.read_ledger
+      starts = ledger[:entries].count { |e| e['job_class'] == 'CIJobs::OverlapJob' && e['job_arg'] == 'start' }
+      finishes = ledger[:entries].count { |e| e['job_class'] == 'CIJobs::OverlapJob' && e['job_arg'] == 'finish' }
+
+      Log.info("overlap ledger: starts=#{starts} finishes=#{finishes}")
+
+      if starts < 2
+        errors << "expected ≥2 OverlapJob starts in #{Config::OVERLAP_OBSERVE_SECONDS}s, got #{starts} " \
+                  "(scheduler may be stuck)"
+      end
+
+      if starts > Config::OVERLAP_MAX_STARTS
+        errors << "got #{starts} OverlapJob starts in #{Config::OVERLAP_OBSERVE_SECONDS}s, " \
+                  "expected ≤ #{Config::OVERLAP_MAX_STARTS} " \
+                  "(possible skip-branch reschedule regression — busy-loop?)"
+      end
+
+      if errors.empty?
+        Log.ok("overlap behaved correctly: #{starts} start(s), #{finishes} finish(es)")
+      end
+
+      errors.concat(check_overlap_worker_exit(pool))
+      errors
+    end
+
+    def check_overlap_worker_exit(pool)
+      pool.unexpected_failures.map do |w|
+        "overlap worker #{w.index} (pid=#{w.pid}) exited with status=#{w.exit_status}"
+      end
     end
 
     def wait_for_completion(expected_total, timeout_seconds)

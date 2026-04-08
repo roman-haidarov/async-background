@@ -6,13 +6,11 @@ module Async
   module Background
     module Queue
       class SocketNotifier
-        # Errors that indicate a worker is unavailable - silently skip
+        # Errors that indicate a worker is unavailable - silently skip and try the next.
         UNAVAILABLE = [
           Errno::ENOENT,        # Socket file doesn't exist (worker hasn't started yet)
           Errno::ECONNREFUSED,  # File exists but no one listening (worker died)
           Errno::EPIPE,         # Connection broken during write
-          Errno::EAGAIN,        # Socket buffer full - wake-up already queued
-          IO::WaitWritable,     # Same as EAGAIN on some platforms
           Errno::ECONNRESET     # Connection reset by peer
         ].freeze
 
@@ -22,8 +20,12 @@ module Async
         end
 
         def notify_all
-          (1..@total_workers).each do |worker_index|
-            notify_one(worker_index)
+          return if @total_workers <= 0
+
+          start = rand(@total_workers)
+          @total_workers.times do |i|
+            worker_index = ((start + i) % @total_workers) + 1
+            return if notify_one(worker_index)
           end
         end
 
@@ -37,14 +39,12 @@ module Async
           ensure
             sock.close rescue nil
           end
+          true
         rescue *UNAVAILABLE
-          # Worker is unavailable - not a problem.
-          # The job is already in the database. The worker will:
-          # - Pick it up on next poll (within QUEUE_POLL_INTERVAL seconds), or
-          # - Pick it up when it starts/restarts via normal fetch loop
+          false
         rescue => e
-          # Unexpected error - log but don't crash the enqueue operation
           Console.logger.warn(self) { "SocketNotifier#notify_one(#{worker_index}) failed: #{e.class} #{e.message}" } rescue nil
+          false
         end
 
         def socket_path(worker_index)

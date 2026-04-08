@@ -85,4 +85,13 @@ module CIJobs
       CIJobs.record_execution!(self.class.name, 'heartbeat')
     end
   end
+
+  class OverlapJob
+    include Async::Background::Job
+    def perform
+      CIJobs.record_execution!(self.class.name, 'start')
+      sleep(ENV.fetch('OVERLAP_JOB_DURATION', '3').to_f)
+      CIJobs.record_execution!(self.class.name, 'finish')
+    end
+  end
 end
