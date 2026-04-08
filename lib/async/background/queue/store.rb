@@ -21,7 +21,7 @@ module Async
             locked_by  INTEGER,
             locked_at  REAL
           );
-          CREATE INDEX IF NOT EXISTS idx_jobs_status_run_at_id ON jobs(status, run_at, id);
+          CREATE INDEX IF NOT EXISTS idx_jobs_pending ON jobs(run_at, id) WHERE status = 'pending';
         SQL
 
         MMAP_SIZE = 268_435_456
@@ -72,9 +72,14 @@ module Async
           ensure_connection
           now = realtime_now
           @db.execute("BEGIN IMMEDIATE")
-          results = @fetch_stmt.execute(worker_id, now, now)
-          row = results.first
-          @fetch_stmt.reset!
+
+          begin
+            results = @fetch_stmt.execute(worker_id, now, now)
+            row = results.first
+          ensure
+            @fetch_stmt.reset! rescue nil
+          end
+
           @db.execute("COMMIT")
           return unless row
 

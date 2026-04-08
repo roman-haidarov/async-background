@@ -1,76 +1,74 @@
 # Async::Background
 
-A lightweight, production-grade cron/interval scheduler for Ruby's [Async](https://github.com/socketry/async) ecosystem. Designed for [Falcon](https://github.com/socketry/falcon) but works with any Async-based application.
+A lightweight cron, interval, and job-queue scheduler for Ruby's [Async](https://github.com/socketry/async) ecosystem. Built for [Falcon](https://github.com/socketry/falcon), works with any Async app.
 
-## What It Does
-
-- **Cron & interval scheduling** — single event loop + min-heap, scales to hundreds of jobs
-- **Dynamic job queue** — enqueue jobs at runtime via SQLite, pick up by background workers
-- **Delayed jobs** — schedule jobs for future execution with `perform_in` / `perform_at` (Sidekiq-like API)
-- **Multi-process safe** — deterministic worker sharding via `Zlib.crc32`, no duplicate execution
-- **Skip overlapping** — if a job is still running when its next tick arrives, the tick is skipped
-- **Timeout protection** — per-job configurable timeout via `Async::Task#with_timeout`
-- **Startup jitter** — random delay to prevent thundering herd after restart
-- **Optional metrics** — shared memory performance tracking with `async-utilization`
+- **Cron & interval scheduling** on a single event loop with a min-heap
+- **Dynamic job queue** backed by SQLite, with delayed jobs (`perform_in` / `perform_at`)
+- **Cross-process wake-ups** over Unix domain sockets — web workers can enqueue and instantly wake background workers
+- **Multi-process safe** — deterministic worker sharding, no duplicate execution
+- **Per-job timeouts**, skip-on-overlap, startup jitter, optional metrics
 
 ## Requirements
 
-- **Ruby >= 3.3** — Fiber Scheduler production-ready ([why?](#why-ruby-33))
-- **Async ~> 2.0** — Fiber Scheduler-based concurrency
-- **Fugit ~> 1.0** — cron expression parsing
+- Ruby >= 3.3
+- `async ~> 2.0`, `fugit ~> 1.0`
+- `sqlite3 ~> 2.0` (optional, for the job queue)
+- `async-utilization ~> 0.3` (optional, for metrics)
 
-## Installation
+## Install
 
 ```ruby
 # Gemfile
 gem "async-background"
-
-# Optional
-gem "sqlite3", "~> 2.0"           # for dynamic job queue
-gem "async-utilization", "~> 0.3"  # for metrics
+gem "sqlite3", "~> 2.0"            # optional
+gem "async-utilization", "~> 0.3"  # optional
 ```
 
 ## ➡️ [Get Started](docs/GET_STARTED.md)
 
-Step-by-step setup guide: schedule config, Falcon integration, Docker, dynamic queue, delayed jobs.
+Full setup walkthrough: schedule config, Falcon integration, Docker, queue, delayed jobs.
 
 ---
 
-## Quick Example: Job Module
-
-Include `Async::Background::Job` for a Sidekiq-like interface:
+## Quick Look
 
 ```ruby
 class SendEmailJob
   include Async::Background::Job
 
   def perform(user_id, template)
-    user = User.find(user_id)
-    Mailer.send(user, template)
+    Mailer.send(User.find(user_id), template)
   end
 end
 
-# Immediate execution in the queue
 SendEmailJob.perform_async(user_id, "welcome")
-
-# Execute after 5 minutes
 SendEmailJob.perform_in(300, user_id, "reminder")
-
-# Execute at a specific time
-SendEmailJob.perform_at(Time.new(2026, 4, 1, 9, 0, 0), user_id, "scheduled")
+SendEmailJob.perform_at(Time.new(2026, 4, 1, 9), user_id, "scheduled")
 ```
 
-Or use the lower-level API directly:
+Schedule recurring jobs in `config/schedule.yml`:
 
-```ruby
-Async::Background::Queue.enqueue(SendEmailJob, user_id, "welcome")
-Async::Background::Queue.enqueue_in(300, SendEmailJob, user_id, "reminder")
-Async::Background::Queue.enqueue_at(Time.new(2026, 4, 1, 9, 0, 0), SendEmailJob, user_id, "scheduled")
+```yaml
+sync_products:
+  class: SyncProductsJob
+  every: 60
+
+daily_report:
+  class: DailyReportJob
+  cron: "0 3 * * *"
+  timeout: 120
 ```
+
+| Key | Description |
+|---|---|
+| `class` | Job class — must include `Async::Background::Job` |
+| `every` / `cron` | One of: interval in seconds, or cron expression |
+| `timeout` | Max execution time in seconds (default: 30) |
+| `worker` | Pin to a specific worker. Default: `crc32(name) % total_workers` |
 
 ---
 
-## ⚠️ Important Notes
+## Gotchas
 
 ### Docker: SQLite requires a named volume
 
@@ -78,18 +76,20 @@ The SQLite database **must not** live on Docker's `overlay2` filesystem. The `ov
 
 ```yaml
 # docker-compose.yml
-volumes:
-  - queue-data:/app/tmp/queue   # ← named volume, NOT overlay2
+services:
+  app:
+    volumes:
+      - queue-data:/app/tmp/queue   # ← named volume, NOT overlay2
 
 volumes:
   queue-data:
 ```
 
-Without this, you will get database crashes in multi-process mode. See [Get Started → Step 3](docs/GET_STARTED.md#step-3-docker) for details.
+Without this, you will get database crashes in multi-process mode. See [Get Started → Step 3](docs/GET_STARTED.md#step-3-docker) for details. If you can't use a named volume, pass `queue_mmap: false` to disable mmap entirely.
 
-### Fork safety
+### Other gotchas
 
-SQLite connections **must not** cross `fork()` boundaries. Always open connections **after** fork (inside `container.run` block), never before. The gem handles this internally via lazy `ensure_connection`, but if you create a `Queue::Store` manually for schema setup, close it before fork:
+**Don't share SQLite connections across `fork()`.** The gem opens connections lazily after fork, but if you create a `Queue::Store` manually for schema setup, close it before forking:
 
 ```ruby
 store = Async::Background::Queue::Store.new(path: db_path)
@@ -97,96 +97,49 @@ store.ensure_database!
 store.close  # ← before fork
 ```
 
-### Clock handling
-
-The `Clock` module provides shared time helpers used across the codebase:
-
-- **`monotonic_now`** (`CLOCK_MONOTONIC`) — for in-process intervals and durations, immune to NTP drift / wall-clock jumps
-- **`realtime_now`** (`CLOCK_REALTIME`) — for persisted timestamps (SQLite `run_at`, `created_at`, `locked_at`)
-
-Interval jobs use monotonic clock. Cron jobs use `Time.now` because "every day at 3am" must respect real time. These are different clocks by design.
+**Two clocks, on purpose.** Interval jobs use `CLOCK_MONOTONIC` (immune to NTP drift). Cron jobs use wall-clock time, because "every day at 3am" needs to mean 3am.
 
 ---
 
-## Architecture
+## How it works
 
 ```
-schedule.yml
-     │
-     ▼
- build_heap          ← parse config, validate, assign workers
-     │
-     ▼
- MinHeap<Entry>      ← O(log N) push/pop, sorted by next_run_at
-     │
-     ▼
- 1 scheduler loop    ← single Async task, sleeps until next entry
-     │
-     ▼
- Semaphore           ← limits concurrent job execution
-     │
-     ▼
- run_job             ← timeout, logging, error handling
+schedule.yml ─► build_heap ─► MinHeap<Entry> ─► scheduler loop ─► Semaphore ─► run_job
 ```
 
-### Queue Architecture
+A single Async task sleeps until the next entry is due, then dispatches it under a semaphore that caps concurrency. Overlapping ticks are skipped and rescheduled.
+
+The dynamic queue runs alongside it:
 
 ```
-Producer (web/console)          Consumer (background worker)
-     │                                │
-     ▼                                ▼
- Queue::Client                   Queue::Store.fetch
-     │                           (WHERE run_at <= now)
-     ├─ push(class, args, run_at)     │
-     ├─ push_in(delay, class, args)   ▼
-     └─ push_at(time, class, args)  run_queue_job
-     │                                │
-     ▼                                ▼
- Queue::Store ──── SQLite ──── Queue::Notifier
- (INSERT job)    (jobs table)    (IO.pipe wakeup)
+   Producer (web/console)              Consumer (background worker)
+          │                                       │
+          ▼                                       ▼
+    Queue::Client                          Queue::Store#fetch
+   push / push_in / push_at                (run_at <= now)
+          │                                       ▲
+          ▼                                       │
+    Queue::Store ──── SQLite (jobs) ──── SocketWaker
+          │                                       ▲
+          └───────► SocketNotifier ───────────────┘
+                    (UNIX socket wake-up, ~80µs)
 ```
 
-## Schedule Config
-
-| Key | Required | Description |
-|---|---|---|
-| `class` | yes | Must include `Async::Background::Job` |
-| `every` | one of | Interval in seconds between runs |
-| `cron` | one of | Cron expression (parsed by Fugit) |
-| `timeout` | no | Max execution time in seconds (default: 30) |
-| `worker` | no | Pin to specific worker index. If omitted — `crc32(name) % total_workers` |
-
-## SQLite Pragmas
-
-| Pragma | Value | Why |
-|---|---|---|
-| `journal_mode` | WAL | Concurrent reads during writes |
-| `synchronous` | NORMAL | Safe with WAL, lower fsync overhead |
-| `mmap_size` | 256 MB | Fast reads ([requires proper filesystem](#docker-sqlite-requires-a-named-volume)) |
-| `cache_size` | 16000 pages | ~64 MB page cache |
-| `busy_timeout` | 5000 ms | Wait instead of failing on lock contention |
+Jobs are persisted in SQLite, so a missed wake-up is never a lost job — workers also poll every 5 seconds as a safety net.
 
 ## Metrics
 
-When `async-utilization` gem is available, metrics are collected in shared memory (`/tmp/async-background.shm`) with lock-free updates per worker.
+With `async-utilization` installed, per-worker stats land in shared memory at `/tmp/async-background.shm` with lock-free updates.
 
 ```ruby
 runner.metrics.values
 # => { total_runs: 142, total_successes: 140, total_failures: 2,
-#      total_timeouts: 0, total_skips: 5, active_jobs: 1,
-#      last_run_at: 1774445243, last_duration_ms: 1250 }
+#      total_timeouts: 0, total_skips: 5, active_jobs: 1, ... }
 
-# Read all workers at once (no server needed)
 Async::Background::Metrics.read_all(total_workers: 2)
 ```
 
-Without the gem — metrics are silently disabled, zero overhead.
-
-## Why Ruby 3.3?
-
-- Ruby 3.0 introduced Fiber Scheduler but had critical bugs
-- Ruby 3.2 is the first production-ready release (per Samuel Williams)
-- `io-event >= 1.14` (pulled by latest `async`) requires Ruby `>= 3.3`
+Without the gem, metrics are silently disabled — zero overhead.
 
 ## License
 

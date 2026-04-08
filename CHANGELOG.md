@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.1
+
+### Bug Fixes
+- **Runner: cron jobs busy-loop on overlap skip** — when a scheduled run was skipped because the previous one was still active, the entry was re-pushed to the heap without calling `reschedule`. For cron jobs (where `interval` is `nil`), this meant `next_run_at` was never advanced to the next cron tick, causing the entry to be picked up again immediately on the next loop iteration. Skip branch now calls `entry.reschedule(monotonic_now)` like the normal path
+- **Store: prepared statement not reset on fetch error** — `@fetch_stmt.reset!` was called after `execute` returned, so an exception inside `execute` left the statement in a dirty state and the next `fetch` could fail. Wrapped in `begin/ensure` to guarantee reset
+
+### Improvements
+- **SocketNotifier: non-blocking enqueue with ring fallback** — `notify_all` no longer connects to all N worker sockets on every enqueue. `UNIXSocket.new` is a blocking, non-fiber-aware syscall, and notifying every worker blocked the Falcon reactor for N `connect()` calls on the hot HTTP enqueue path. Now wakes a single worker chosen by random offset, falling back through the ring only if the chosen worker is dead (`ECONNREFUSED` etc.). Happy path: 1 connect. Worst case (all workers down): N connects — same as before, but only when actually needed. Safe because the queue is shared in SQLite, not sharded per worker
+- **SocketNotifier: cleaned up `UNAVAILABLE` error list** — removed `IO::WaitWritable` and `Errno::EAGAIN`. They implied "socket buffer full", but `write_nonblock` of a single byte to a freshly-opened connection cannot fill the kernel buffer. Listing them only misled readers
+- **Store: partial index for pending lookup** — replaced `idx_jobs_status_run_at_id(status, run_at, id)` with partial index `idx_jobs_pending(run_at, id) WHERE status = 'pending'`. Smaller on disk, cheaper to update, and matches the only query that uses it (`fetch`). `done`/`failed`/`running` rows no longer occupy index pages
+
 ## 0.6.0
 
 ### Breaking Changes
