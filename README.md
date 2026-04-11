@@ -3,7 +3,8 @@
 A lightweight cron, interval, and job-queue scheduler for Ruby's [Async](https://github.com/socketry/async) ecosystem. Built for [Falcon](https://github.com/socketry/falcon), works with any Async app.
 
 - **Cron & interval scheduling** on a single event loop with a min-heap
-- **Dynamic job queue** backed by SQLite, with delayed jobs (`perform_in` / `perform_at`)
+- **Dynamic job queue** backed by SQLite (via [Extralite](https://github.com/digital-fabric/extralite)), with delayed jobs (`perform_in` / `perform_at`)
+- **Bundled SQLite** — `extralite-bundle` ships the SQLite amalgamation inline, so no system `libsqlite3-dev` is required to build
 - **Cross-process wake-ups** over Unix domain sockets — web workers can enqueue and instantly wake background workers
 - **Multi-process safe** — deterministic worker sharding, no duplicate execution
 - **Per-job timeouts**, skip-on-overlap, startup jitter, optional metrics
@@ -12,7 +13,7 @@ A lightweight cron, interval, and job-queue scheduler for Ruby's [Async](https:/
 
 - Ruby >= 3.3
 - `async ~> 2.0`, `fugit ~> 1.0`
-- `sqlite3 ~> 2.0` (optional, for the job queue)
+- `extralite-bundle ~> 2.12` (optional, for the job queue)
 - `async-utilization ~> 0.3` (optional, for metrics)
 
 ## Install
@@ -20,9 +21,11 @@ A lightweight cron, interval, and job-queue scheduler for Ruby's [Async](https:/
 ```ruby
 # Gemfile
 gem "async-background"
-gem "sqlite3", "~> 2.0"            # optional
-gem "async-utilization", "~> 0.3"  # optional
+gem "extralite-bundle",  "~> 2.12"  # optional, for the job queue
+gem "async-utilization", "~> 0.3"   # optional, for metrics
 ```
+
+> **Why extralite-bundle?** Extralite has a smaller, faster C extension than the `sqlite3` gem and releases the GVL more aggressively during queries, which plays nicer with multi-threaded setups. The `-bundle` variant ships SQLite source inline — no system `libsqlite3-dev` required at build time.
 
 ## ➡️ [Get Started](docs/GET_STARTED.md)
 
@@ -98,6 +101,8 @@ store.close  # ← before fork
 ```
 
 **Two clocks, on purpose.** Interval jobs use `CLOCK_MONOTONIC` (immune to NTP drift). Cron jobs use wall-clock time, because "every day at 3am" needs to mean 3am.
+
+**Queue holds the GVL during each query.** SQLite queries run inside the C extension and hold the Ruby GVL for their duration. In practice queue operations are short (sub-millisecond), so this is fine for fiber-based servers like Falcon, but it means long-running queries will stall the Async reactor. Keep queue operations small and avoid heavy scans on the hot path.
 
 ---
 

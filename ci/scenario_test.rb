@@ -34,7 +34,7 @@ require 'async/background/queue/client'
 require 'console'
 require 'fileutils'
 require 'json'
-require 'sqlite3'
+require 'extralite'
 require 'timeout'
 
 $LOAD_PATH.unshift(File.expand_path('../lib', __dir__))
@@ -102,19 +102,18 @@ module ScenarioTest
 
   class QueueInspector
     def initialize(path)
-      @db = SQLite3::Database.new(path)
-      @db.execute('PRAGMA journal_mode = WAL')
-      @db.execute('PRAGMA busy_timeout = 5000')
+      @db = Extralite::Database.new(path, wal: true)
+      @db.busy_timeout = 5
     end
 
     # => { 'pending' => Int, 'running' => Int, 'done' => Int, 'failed' => Int }
     def counts_by_status
-      rows = @db.execute("SELECT status, COUNT(*) FROM jobs GROUP BY status")
+      rows = @db.query_array("SELECT status, COUNT(*) FROM jobs GROUP BY status")
       Hash.new(0).merge(rows.to_h)
     end
 
     def ids_by_status
-      rows = @db.execute("SELECT id, status FROM jobs")
+      rows = @db.query_array("SELECT id, status FROM jobs")
       rows.each_with_object(Hash.new { |h, k| h[k] = [] }) do |(id, status), acc|
         acc[status] << id
       end

@@ -4,8 +4,8 @@ source 'https://rubygems.org'
 
 gemspec
 
-gem 'sqlite3',           '~> 2.0'
-gem 'async-utilization',  '~> 0.3'
+gem 'extralite-bundle',  '~> 2.12'
+gem 'async-utilization', '~> 0.3'
 gem 'async-container',   '~> 0.18'
 
 group :development, :test do

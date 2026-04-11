@@ -55,7 +55,7 @@ RSpec.describe 'Queue Integration', type: :integration do
       store.complete(job[:id])
 
       db = store.instance_variable_get(:@db)
-      status = db.execute('SELECT status FROM jobs WHERE id = ?', [job[:id]]).first[0]
+      status = db.query_array('SELECT status FROM jobs WHERE id = ?', job[:id]).first[0]
       expect(status).to eq('done')
 
       # Delayed job is not yet runnable
@@ -79,7 +79,7 @@ RSpec.describe 'Queue Integration', type: :integration do
       store.fail(job_id)
 
       db = store.instance_variable_get(:@db)
-      status = db.execute('SELECT status FROM jobs WHERE id = ?', [job_id]).first[0]
+      status = db.query_array('SELECT status FROM jobs WHERE id = ?', job_id).first[0]
       expect(status).to eq('failed')
     end
 
@@ -117,7 +117,7 @@ RSpec.describe 'Queue Integration', type: :integration do
 
       db = store.instance_variable_get(:@db)
       completed_jobs = fetched_jobs.map do |job|
-        db.execute('SELECT status FROM jobs WHERE id = ?', [job[:id]]).first[0]
+        db.query_array('SELECT status FROM jobs WHERE id = ?', job[:id]).first[0]
       end
 
       expect(completed_jobs).to all(eq('done'))
