@@ -105,6 +105,7 @@ module Async
               break unless job
 
               semaphore.async { |job_task| run_queue_job(job_task, job) }
+              sleep(0)
             end
           end
         end

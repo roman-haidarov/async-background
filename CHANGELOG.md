@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.7.0
+
+### Breaking Changes
+- **Queue backend changed from `sqlite3` to `extralite-bundle`** — users with the queue feature enabled must replace `gem 'sqlite3', '~> 2.0'` with `gem 'extralite-bundle', '~> 2.12'` in their Gemfile. No application code changes required: `Job.perform_async`, `Job.perform_in`, `Job.perform_at`, and the rest of the public API are unchanged. The on-disk database format is identical (both libraries speak the same SQLite format), so existing `.db` files continue to work as-is — no schema migration needed.
+
+### Improvements
+- **Bundled SQLite, no system library required** — `extralite-bundle` ships the SQLite amalgamation source inline, so `libsqlite3-dev` is no longer needed to build the gem. `Dockerfile.ci` drops `libsqlite3-dev` from its apt install list (build still requires `build-essential` for compiling the C extension).
+- **`enqueue` uses `INSERT ... RETURNING id`** — the new id is returned atomically in the same statement. This is both simpler than calling `last_insert_rowid` after `execute` and also safe under concurrent writers, where `last_insert_rowid` (which is connection-scoped) would race.
+- **Removed manual `BEGIN IMMEDIATE / COMMIT / ROLLBACK` from `fetch`** — `UPDATE ... RETURNING` is atomic under the writer lock, so the explicit transaction wrapper was redundant. Saves 2 SQL operations per fetch (BEGIN + COMMIT).
+- **Single-connection `ensure_database!`** — previously opened a separate one-shot connection to install the schema, then a second connection on first `fetch`/`enqueue`. Now reuses `ensure_connection` and adds a single checkpoint call.
+- **Removed `@schema_checked` flag** — no longer meaningful with single-connection setup. `CREATE TABLE IF NOT EXISTS` is idempotent, so running it once on connection open is free.
+- **Simplified PRAGMA setup** — `journal_mode=WAL` is now set via `Extralite::Database.new(path, wal: true)` instead of a manual `PRAGMA` block. Only `mmap_size`, `cache_size`, `temp_store`, and `journal_size_limit` remain in the explicit pragma hash. `busy_timeout` is set via the dedicated `#busy_timeout=` setter.
+- **`gvl_release_threshold` tuned for queue workload** — set to 1000 iterated rows, which releases the GVL more aggressively than the `sqlite3` gem did and improves behavior under multi-threaded contention.
+
+### Migration
+For users with the queue feature enabled:
+
+```diff
+# Gemfile
+- gem 'sqlite3', '~> 2.0'
++ gem 'extralite-bundle', '~> 2.12'
+```
+
+Run `bundle install` and restart workers. No code, schema, or data migration is required.
+
+For users **not** using the queue (cron/interval scheduling only): no action needed. The queue dependency is optional and your existing Gemfile continues to work.
+
+### Notes on Concurrency
+Extralite holds the Ruby GVL for the duration of each SQLite query (releasing it periodically via `gvl_release_threshold` while iterating rows). In practice queue operations are short, so this is a fine trade-off for fiber-based servers like Falcon (one Ruby thread per process, fibers cooperatively scheduled by the Async reactor). Just keep queries small and avoid heavy scans on the hot path — a multi-second query will stall the reactor until it finishes.
+
 ## 0.6.1
 
 ### Bug Fixes

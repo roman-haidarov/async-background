@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 require 'rspec'
-require 'sqlite3'
+require 'extralite'
 require 'tempfile'
 require 'fileutils'
 

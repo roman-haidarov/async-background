@@ -35,8 +35,8 @@ Gem::Specification.new do |spec|
   spec.add_dependency 'fugit',   '~> 1.0'
 
   # Optional: add to your own Gemfile if you need these features
-  #   gem 'sqlite3',          '~> 2.0'  # dynamic job queue
-  #   gem 'async-utilization', '~> 0.3' # shared-memory worker metrics
+  #   gem 'extralite-bundle',  '~> 2.12' # dynamic job queue (fiber-native SQLite)
+  #   gem 'async-utilization', '~> 0.3'  # shared-memory worker metrics
 
   spec.add_development_dependency 'rake',  '~> 13.0'
   spec.add_development_dependency 'rspec', '~> 3.12'

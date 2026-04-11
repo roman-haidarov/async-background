@@ -44,15 +44,13 @@ RSpec.describe Async::Background::Queue::Store, type: :unit do
   describe '#ensure_database!' do
     it 'creates jobs table' do
       store.enqueue('Probe', [])
-      result = db.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='jobs'"
-      )
+      result = db.query_array("SELECT name FROM sqlite_master WHERE type='table' AND name='jobs'")
       expect(result).not_to be_empty
     end
 
     it 'creates proper table structure' do
       store.enqueue('Probe', [])
-      columns = db.execute("PRAGMA table_info(jobs)")
+      columns = db.query_array("PRAGMA table_info(jobs)")
       column_names = columns.map { |col| col[1] }
 
       %w[id class_name args status created_at run_at locked_by locked_at].each do |required|
@@ -62,9 +60,7 @@ RSpec.describe Async::Background::Queue::Store, type: :unit do
 
     it 'creates indexes for performance' do
       store.enqueue('Probe', [])
-      indexes = db.execute(
-        "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='jobs'"
-      )
+      indexes = db.query_array("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='jobs'")
       index_names = indexes.map { |idx| idx[0] }
 
       expect(index_names).to include('idx_jobs_pending')
@@ -79,14 +75,14 @@ RSpec.describe Async::Background::Queue::Store, type: :unit do
       expect(job_id).to be_a(Integer)
       expect(job_id).to be > 0
 
-      run_at = db.execute("SELECT run_at FROM jobs WHERE id = ?", [job_id]).first[0]
+      run_at = db.query_array("SELECT run_at FROM jobs WHERE id = ?", job_id).first[0]
       expect(run_at).to be_within(1.0).of(before_time)
     end
 
     it 'adds job with specified run_at time' do
       future_time = Time.now.to_f + 3600
       job_id = store.enqueue('DelayedJob', ['arg'], future_time)
-      row = db.execute("SELECT run_at FROM jobs WHERE id = ?", [job_id]).first
+      row = db.query_array("SELECT run_at FROM jobs WHERE id = ?", job_id).first
       expect(row[0]).to be_within(0.1).of(future_time)
     end
 
@@ -94,7 +90,7 @@ RSpec.describe Async::Background::Queue::Store, type: :unit do
       args = [1, 'string', { 'key' => 'value' }, [1, 2, 3]]
       job_id = store.enqueue('ComplexJob', args)
 
-      jobs = db.execute("SELECT args FROM jobs WHERE id = ?", [job_id])
+      jobs = db.query_array("SELECT args FROM jobs WHERE id = ?", job_id)
       stored_args = JSON.parse(jobs.first[0])
       expect(stored_args).to eq(args)
     end
@@ -102,7 +98,7 @@ RSpec.describe Async::Background::Queue::Store, type: :unit do
     it 'sets initial status as pending' do
       job_id = store.enqueue('TestJob', [])
 
-      jobs = db.execute("SELECT status FROM jobs WHERE id = ?", [job_id])
+      jobs = db.query_array("SELECT status FROM jobs WHERE id = ?", job_id)
       expect(jobs.first[0]).to eq('pending')
     end
 
@@ -120,7 +116,7 @@ RSpec.describe Async::Background::Queue::Store, type: :unit do
       job_id = store.enqueue('TimestampedJob', [])
       after_time = Time.now.to_f
 
-      created_at = db.execute("SELECT created_at FROM jobs WHERE id = ?", [job_id]).first[0]
+      created_at = db.query_array("SELECT created_at FROM jobs WHERE id = ?", job_id).first[0]
       expect(created_at).to be >= before_time
       expect(created_at).to be <= after_time
     end
@@ -147,8 +143,8 @@ RSpec.describe Async::Background::Queue::Store, type: :unit do
       it 'marks job as running and locks it' do
         job = store.fetch(worker_id)
 
-        row = db.execute(
-          "SELECT status, locked_by, locked_at FROM jobs WHERE id = ?", [job[:id]]
+        row = db.query_array(
+          "SELECT status, locked_by, locked_at FROM jobs WHERE id = ?", job[:id]
         ).first
 
         expect(row[0]).to eq('running')
@@ -222,7 +218,7 @@ RSpec.describe Async::Background::Queue::Store, type: :unit do
 
       store.complete(job_id)
 
-      jobs = db.execute("SELECT status FROM jobs WHERE id = ?", [job_id])
+      jobs = db.query_array("SELECT status FROM jobs WHERE id = ?", job_id)
       expect(jobs.first[0]).to eq('done')
     end
 
@@ -240,7 +236,7 @@ RSpec.describe Async::Background::Queue::Store, type: :unit do
 
       store.fail(job_id)
 
-      jobs = db.execute("SELECT status FROM jobs WHERE id = ?", [job_id])
+      jobs = db.query_array("SELECT status FROM jobs WHERE id = ?", job_id)
       expect(jobs.first[0]).to eq('failed')
     end
 
@@ -256,8 +252,8 @@ RSpec.describe Async::Background::Queue::Store, type: :unit do
 
       store.fail(id_a)
 
-      status_a = db.execute("SELECT status FROM jobs WHERE id = ?", [id_a]).first[0]
-      status_b = db.execute("SELECT status FROM jobs WHERE id = ?", [id_b]).first[0]
+      status_a = db.query_array("SELECT status FROM jobs WHERE id = ?", id_a).first[0]
+      status_b = db.query_array("SELECT status FROM jobs WHERE id = ?", id_b).first[0]
 
       expect(status_a).to eq('failed')
       expect(status_b).to eq('running')
@@ -274,7 +270,7 @@ RSpec.describe Async::Background::Queue::Store, type: :unit do
       recovered = store.recover(worker_id)
 
       expect(recovered).to eq(1)
-      row = db.execute("SELECT status, locked_by, locked_at FROM jobs WHERE id = ?", [job_id]).first
+      row = db.query_array("SELECT status, locked_by, locked_at FROM jobs WHERE id = ?", job_id).first
       expect(row[0]).to eq('pending')
       expect(row[1]).to be_nil
       expect(row[2]).to be_nil
@@ -287,7 +283,7 @@ RSpec.describe Async::Background::Queue::Store, type: :unit do
       recovered = store.recover(1)
 
       expect(recovered).to eq(0)
-      row = db.execute("SELECT status, locked_by FROM jobs WHERE id = ?", [job_id]).first
+      row = db.query_array("SELECT status, locked_by FROM jobs WHERE id = ?", job_id).first
       expect(row[0]).to eq('running')
       expect(row[1]).to eq(2)
     end
