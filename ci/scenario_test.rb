@@ -439,11 +439,11 @@ module ScenarioTest
       Log.header('SCENARIO 1: NORMAL (fast + slow + failing)')
 
       setup_clean_state!
+      enqueue_normal_jobs
 
       pool = WorkerPool.new(socket_dir: Config::SOCKET_DIR, total_workers: Config::TOTAL_WORKERS)
       pool.start_initial_cohort!
 
-      enqueue_normal_jobs
       wait_for_completion(Config::TOTAL_JOBS, Config::SCENARIO_TIMEOUT)
 
       pool.stop_gracefully!

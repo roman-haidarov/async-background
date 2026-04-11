@@ -51,6 +51,7 @@ module CIJobs
   class FastJob
     include Async::Background::Job
     def perform(n)
+      sleep(0.005)
       CIJobs.record_execution!(self.class.name, n)
     end
   end
