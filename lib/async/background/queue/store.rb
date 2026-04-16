@@ -93,6 +93,7 @@ module Async
           @db.execute("ROLLBACK") rescue nil
           raise
         end
+
         def complete(job_id)
           ensure_connection
           @complete_stmt.execute(job_id)
@@ -101,6 +102,47 @@ module Async
         def fail(job_id)
           ensure_connection
           @fail_stmt.execute(job_id)
+        end
+
+        def retry_or_fail(job_id, options:)
+          ensure_connection
+          retry_options = options.is_a?(Job::Options) ? options : Job::Options.new(**(options || {}))
+
+          @db.execute("BEGIN IMMEDIATE")
+
+          begin
+            row = @retry_state_stmt.execute(job_id).first
+            return commit_without_change unless row
+
+            current_options = row[0] ? JSON.parse(row[0], symbolize_names: true) : {}
+            effective_options = Job::Options.new(**retry_options.to_h.compact.merge(current_options))
+
+            unless effective_options.retry?
+              @fail_stmt.execute(job_id)
+              @db.execute("COMMIT")
+              return :failed
+            end
+
+            next_attempt = effective_options.next_attempt
+
+            if next_attempt <= effective_options.__send__(:retry)
+              delay = effective_options.next_retry_delay(next_attempt)
+              retry_options_json = JSON.generate(effective_options.with_attempt(next_attempt).to_h.compact)
+              @retry_stmt.execute(realtime_now + delay, retry_options_json, job_id)
+              result = :retried
+            else
+              @fail_stmt.execute(job_id)
+              result = :failed
+            end
+          ensure
+            @retry_state_stmt.reset! rescue nil
+          end
+
+          @db.execute("COMMIT")
+          result
+        rescue
+          @db.execute("ROLLBACK") rescue nil
+          raise
         end
 
         def recover(worker_id)
@@ -168,8 +210,16 @@ module Async
             RETURNING id, class_name, args, options
           SQL
 
-          @complete_stmt = @db.prepare("UPDATE jobs SET status = 'done' WHERE id = ?")
-          @fail_stmt     = @db.prepare("UPDATE jobs SET status = 'failed' WHERE id = ?")
+          @complete_stmt = @db.prepare(
+            "UPDATE jobs SET status = 'done', locked_by = NULL, locked_at = NULL WHERE id = ?"
+          )
+          @fail_stmt = @db.prepare(
+            "UPDATE jobs SET status = 'failed', locked_by = NULL, locked_at = NULL WHERE id = ?"
+          )
+          @retry_state_stmt = @db.prepare("SELECT options FROM jobs WHERE id = ?")
+          @retry_stmt = @db.prepare(
+            "UPDATE jobs SET status = 'pending', locked_by = NULL, locked_at = NULL, run_at = ?, options = ? WHERE id = ?"
+          )
 
           @requeue_stmt = @db.prepare(
             "UPDATE jobs SET status = 'pending', locked_by = NULL, locked_at = NULL " \
@@ -180,11 +230,21 @@ module Async
         end
 
         def finalize_statements
-          [@enqueue_stmt, @fetch_stmt, @complete_stmt, @fail_stmt, @requeue_stmt, @cleanup_stmt].each do |s|
+          [
+            @enqueue_stmt,
+            @fetch_stmt,
+            @complete_stmt,
+            @fail_stmt,
+            @retry_state_stmt,
+            @retry_stmt,
+            @requeue_stmt,
+            @cleanup_stmt
+          ].each do |s|
             s&.close rescue next
           end
 
-          @enqueue_stmt = @fetch_stmt = @complete_stmt = @fail_stmt = @requeue_stmt = @cleanup_stmt = nil
+          @enqueue_stmt = @fetch_stmt = @complete_stmt = @fail_stmt = @retry_state_stmt = nil
+          @retry_stmt = @requeue_stmt = @cleanup_stmt = nil
         end
 
         def maybe_cleanup
@@ -197,6 +257,11 @@ module Async
           if @db.changes > 100
             @db.execute("PRAGMA incremental_vacuum")
           end
+        end
+
+        def commit_without_change
+          @db.execute("COMMIT")
+          nil
         end
       end
     end

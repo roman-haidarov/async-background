@@ -113,8 +113,8 @@ module Async
       def run_queue_job(job_task, job)
         class_name = job[:class_name]
         args       = job[:args]
-        klass      = resolve_job_class(class_name)
         opts       = Job::Options.new(**job[:options])
+        klass      = resolve_job_class(class_name)
         timeout    = opts.timeout
 
         metrics.job_started(nil)
@@ -131,14 +131,11 @@ module Async
         }
       rescue ::Async::TimeoutError
         metrics.job_timed_out(nil)
-        @queue_store.fail(job[:id])
-        logger.error('Async::Background') { "queue(#{class_name}): timed out after #{timeout}s" }
+        handle_queue_retry(job, opts, "timed out after #{timeout}s")
       rescue => e
         metrics.job_failed(nil, e)
-        @queue_store.fail(job[:id])
-        logger.error('Async::Background') {
-          "queue(#{class_name}): #{e.class} #{e.message}\n#{e.backtrace.join("\n")}"
-        }
+        error_message = ["#{e.class} #{e.message}", *e.backtrace].join("\n")
+        handle_queue_retry(job, opts, error_message)
       end
 
       def resolve_job_class(class_name)
@@ -153,6 +150,23 @@ module Async
         raise ConfigError, "#{class_name} must include Async::Background::Job" unless klass.respond_to?(:perform_now)
 
         klass
+      end
+
+      def handle_queue_retry(job, opts, message)
+        result = @queue_store.retry_or_fail(job[:id], options: opts)
+
+        if result == :retried
+          attempt = opts.next_attempt
+          delay = opts.next_retry_delay(attempt)
+          @queue_waker&.signal
+          logger.warn('Async::Background') {
+            "queue(#{job[:class_name]}): #{message}; retry #{attempt}/#{opts.__send__(:retry)} in #{delay}s"
+          }
+        else
+          logger.error('Async::Background') {
+            "queue(#{job[:class_name]}): #{message}"
+          }
+        end
       end
 
       def scheduler_loop(task)

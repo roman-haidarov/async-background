@@ -55,7 +55,7 @@ RSpec.describe Async::Background::Queue::Store, type: :unit do
       columns = db.execute("PRAGMA table_info(jobs)")
       column_names = columns.map { |col| col[1] }
 
-      %w[id class_name args status created_at run_at locked_by locked_at].each do |required|
+      %w[id class_name args options status created_at run_at locked_by locked_at].each do |required|
         expect(column_names).to include(required)
       end
     end
@@ -97,6 +97,13 @@ RSpec.describe Async::Background::Queue::Store, type: :unit do
       jobs = db.execute("SELECT args FROM jobs WHERE id = ?", [job_id])
       stored_args = JSON.parse(jobs.first[0])
       expect(stored_args).to eq(args)
+    end
+
+    it 'stores options as JSON when present' do
+      job_id = store.enqueue('ConfiguredJob', [], nil, options: { timeout: 30, retry: 2 })
+
+      options_json = db.execute("SELECT options FROM jobs WHERE id = ?", [job_id]).first[0]
+      expect(JSON.parse(options_json)).to eq({ 'timeout' => 30, 'retry' => 2 })
     end
 
     it 'sets initial status as pending' do
@@ -165,6 +172,18 @@ RSpec.describe Async::Background::Queue::Store, type: :unit do
       end
     end
 
+    context 'with jobs that have options' do
+      before do
+        store.enqueue('RetryJob', ['arg1'], Time.now.to_f - 1, options: { retry: 2, retry_delay: 5, attempt: 1 })
+      end
+
+      it 'returns symbolized options from the JSON column' do
+        job = store.fetch(worker_id)
+
+        expect(job[:options]).to eq(retry: 2, retry_delay: 5, attempt: 1)
+      end
+    end
+
     context 'with no ready jobs' do
       before do
         store.enqueue('FutureJob', [], Time.now.to_f + 3600)
@@ -222,8 +241,10 @@ RSpec.describe Async::Background::Queue::Store, type: :unit do
 
       store.complete(job_id)
 
-      jobs = db.execute("SELECT status FROM jobs WHERE id = ?", [job_id])
-      expect(jobs.first[0]).to eq('done')
+      row = db.execute("SELECT status, locked_by, locked_at FROM jobs WHERE id = ?", [job_id]).first
+      expect(row[0]).to eq('done')
+      expect(row[1]).to be_nil
+      expect(row[2]).to be_nil
     end
 
     it 'is a no-op for non-existent job' do
@@ -240,8 +261,10 @@ RSpec.describe Async::Background::Queue::Store, type: :unit do
 
       store.fail(job_id)
 
-      jobs = db.execute("SELECT status FROM jobs WHERE id = ?", [job_id])
-      expect(jobs.first[0]).to eq('failed')
+      row = db.execute("SELECT status, locked_by, locked_at FROM jobs WHERE id = ?", [job_id]).first
+      expect(row[0]).to eq('failed')
+      expect(row[1]).to be_nil
+      expect(row[2]).to be_nil
     end
 
     it 'is a no-op for non-existent job' do
@@ -261,6 +284,66 @@ RSpec.describe Async::Background::Queue::Store, type: :unit do
 
       expect(status_a).to eq('failed')
       expect(status_b).to eq('running')
+    end
+  end
+
+  describe '#retry_or_fail' do
+    let(:worker_id) { 1 }
+    let(:retry_options) { Async::Background::Job::Options.new(retry: 2, retry_delay: 5, backoff: :linear) }
+
+    it 'reschedules the job while retries remain and stores attempt inside options' do
+      job_id = store.enqueue('RetryJob', [], Time.now.to_f - 1, options: retry_options.to_h.compact)
+      store.fetch(worker_id)
+
+      expect(store.retry_or_fail(job_id, options: retry_options)).to eq(:retried)
+
+      row = db.execute("SELECT status, locked_by, locked_at, options, run_at FROM jobs WHERE id = ?", [job_id]).first
+      expect(row[0]).to eq('pending')
+      expect(row[1]).to be_nil
+      expect(row[2]).to be_nil
+      expect(JSON.parse(row[3])).to include('attempt' => 1, 'retry' => 2, 'retry_delay' => 5.0, 'backoff' => 'linear')
+      expect(row[4]).to be > Time.now.to_f
+    end
+
+    it 'increments the stored attempt across retries without extra columns' do
+      job_id = store.enqueue('RetryJob', [], Time.now.to_f - 1, options: retry_options.to_h.compact)
+      job = store.fetch(worker_id)
+      store.retry_or_fail(job_id, options: Async::Background::Job::Options.new(**job[:options]))
+      db.execute("UPDATE jobs SET run_at = ? WHERE id = ?", [Time.now.to_f - 1, job_id])
+
+      job = store.fetch(worker_id)
+      store.retry_or_fail(job_id, options: Async::Background::Job::Options.new(**job[:options]))
+
+      row = db.execute("SELECT options FROM jobs WHERE id = ?", [job_id]).first
+      expect(JSON.parse(row[0])).to include('attempt' => 2)
+    end
+
+    it 'marks the job as failed after retry exhaustion' do
+      job_id = store.enqueue('RetryJob', [], Time.now.to_f - 1, options: retry_options.to_h.compact)
+      job = store.fetch(worker_id)
+      store.retry_or_fail(job_id, options: Async::Background::Job::Options.new(**job[:options]))
+      db.execute("UPDATE jobs SET run_at = ? WHERE id = ?", [Time.now.to_f - 1, job_id])
+
+      job = store.fetch(worker_id)
+      store.retry_or_fail(job_id, options: Async::Background::Job::Options.new(**job[:options]))
+      db.execute("UPDATE jobs SET run_at = ? WHERE id = ?", [Time.now.to_f - 1, job_id])
+
+      job = store.fetch(worker_id)
+      expect(store.retry_or_fail(job_id, options: Async::Background::Job::Options.new(**job[:options]))).to eq(:failed)
+
+      row = db.execute("SELECT status, options FROM jobs WHERE id = ?", [job_id]).first
+      expect(row[0]).to eq('failed')
+      expect(JSON.parse(row[1])).to include('attempt' => 2)
+    end
+
+    it 'falls back to fail when retries are disabled' do
+      job_id = store.enqueue('NoRetryJob', [], Time.now.to_f - 1)
+      store.fetch(worker_id)
+
+      expect(store.retry_or_fail(job_id, options: Async::Background::Job::Options.new)).to eq(:failed)
+
+      row = db.execute("SELECT status FROM jobs WHERE id = ?", [job_id]).first
+      expect(row[0]).to eq('failed')
     end
   end
 

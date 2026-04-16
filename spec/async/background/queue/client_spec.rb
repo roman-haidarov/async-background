@@ -278,4 +278,55 @@ RSpec.describe Async::Background::Queue::Client, type: :unit do
       }.to raise_error(ArgumentError, /must include Async::Background::Job/)
     end
   end
+
+  describe 'option normalization' do
+    let(:retrying_job_class) do
+      Class.new do
+        include Async::Background::Job
+        options timeout: 15, retry: 3, retry_delay: 4, backoff: :linear
+
+        def self.name
+          'RetryingQueueJob'
+        end
+
+        def self.perform_now(*); end
+      end
+    end
+
+    before do
+      @previous_client = Async::Background::Queue.default_client
+      Async::Background::Queue.default_client = client
+    end
+
+    after do
+      Async::Background::Queue.default_client = @previous_client
+    end
+
+    it 'merges class-level and call-site retry options' do
+      expect(mock_store).to receive(:enqueue).with(
+        'RetryingQueueJob',
+        ['arg'],
+        nil,
+        options: {
+          timeout: 15,
+          retry: 5,
+          retry_delay: 1.5,
+          backoff: :exponential
+        }
+      ).and_return(77)
+      expect(mock_notifier).to receive(:notify_all)
+
+      Async::Background::Queue.enqueue(
+        retrying_job_class,
+        'arg',
+        options: { retry: 5, retry_delay: 1.5, backoff: :exponential }
+      )
+    end
+
+    it 'validates retry options before enqueueing' do
+      expect {
+        Async::Background::Queue.enqueue(retrying_job_class, options: { retry: 2, retry_delay: nil })
+      }.to raise_error(ArgumentError, /retry_delay is required/)
+    end
+  end
 end

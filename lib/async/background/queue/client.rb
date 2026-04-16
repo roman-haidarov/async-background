@@ -56,10 +56,10 @@ module Async
         private
 
         def build_options(job_class, call_site_options)
-          merged = resolve_options(job_class).merge!(call_site_options.compact)
+          merged = resolve_options(job_class).merge!(call_site_options)
           return EMPTY_OPTIONS if merged.empty?
 
-          Job::Options.new(**merged).to_h
+          Job::Options.new(**merged).to_h.compact
         end
 
         def ensure_configured!
