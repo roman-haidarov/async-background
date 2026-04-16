@@ -8,7 +8,7 @@ Create `config/schedule.yml`:
 sync_products:
   class: SyncProductsJob
   every: 60
-  timeout: 30
+  timeout: 120
 
 daily_report:
   class: DailyReportJob
@@ -192,11 +192,27 @@ class SendEmailJob
 end
 ```
 
+You can override the default 120 s timeout at the **class level** using `.options`:
+
+```ruby
+class HeavySyncJob
+  include Async::Background::Job
+
+  options timeout: 300  # this job needs up to 5 minutes; overrides the default 120s
+
+  def perform(account_id)
+    Account.find(account_id).full_sync!
+  end
+end
+```
+
 Now you have three ways to enqueue:
 
 ```ruby
 # Immediate — executes as soon as a worker picks it up
-SendEmailJob.perform_async(user_id, "welcome")
+# timeout priority: options passed here > class-level options > default 120s
+SendEmailJob.perform_async(user_id, "welcome")                          # timeout: 120s (default)
+SendEmailJob.perform_async(user_id, "welcome", options: { timeout: 10 }) # timeout: 10s (call-level override)
 
 # Delayed — executes after N seconds
 SendEmailJob.perform_in(300, user_id, "reminder")       # in 5 minutes
@@ -205,6 +221,8 @@ SendEmailJob.perform_in(3600, user_id, "follow_up")     # in 1 hour
 # Scheduled — executes at a specific time
 SendEmailJob.perform_at(Time.new(2026, 4, 1, 9, 0, 0), user_id, "promo")
 ```
+
+> **Timeout priority:** options passed at **call time** (`options: { timeout: … }`) take the highest precedence, then **class-level** `.options timeout: …`, and finally the **default of 120 s**. This lets you set a sensible per-class default and still override it for individual enqueue calls.
 
 > **Note:** `perform` is an instance method. When you include `Async::Background::Job`, the module creates a class-level `perform_now` wrapper that instantiates the class and calls `#perform`. This means your job classes are stateless by default.
 
@@ -247,7 +265,7 @@ pending → running → done
 
 - **Recovery:** On worker restart, stale `running` jobs are automatically requeued as `pending`.
 - **Cleanup:** Completed jobs older than 1 hour are deleted every 5 minutes (piggyback on fetch).
-- **Timeout:** Queue jobs use the default timeout of 30 seconds.
+- **Timeout:** Queue jobs use the default timeout of 120 seconds.
 
 ### Worker isolation
 

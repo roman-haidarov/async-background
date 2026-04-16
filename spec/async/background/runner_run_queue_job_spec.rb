@@ -85,7 +85,7 @@ RSpec.describe 'Async::Background::Runner#run_queue_job', type: :unit do
   end
 
   describe 'success path' do
-    let(:job) { { id: 42, class_name: 'RunQueueJobSpec_Ok', args: ['hello', 1] } }
+    let(:job) { { id: 42, class_name: 'RunQueueJobSpec_Ok', args: ['hello', 1], options: {} } }
 
     it 'calls perform on the resolved job class with the stored args' do
       expect(mock_store).to receive(:complete).with(42)
@@ -118,7 +118,7 @@ RSpec.describe 'Async::Background::Runner#run_queue_job', type: :unit do
     end
 
     it 'handles a job with no arguments' do
-      job_no_args = { id: 7, class_name: 'RunQueueJobSpec_Ok', args: [] }
+      job_no_args = { id: 7, class_name: 'RunQueueJobSpec_Ok', args: [], options: {} }
       expect(mock_store).to receive(:complete).with(7)
 
       runner.send(:run_queue_job, passthrough_task, job_no_args)
@@ -128,7 +128,7 @@ RSpec.describe 'Async::Background::Runner#run_queue_job', type: :unit do
   end
 
   describe 'timeout path' do
-    let(:job) { { id: 100, class_name: 'RunQueueJobSpec_Slow', args: [] } }
+    let(:job) { { id: 100, class_name: 'RunQueueJobSpec_Slow', args: [], options: {} } }
 
     it 'marks the job as failed in the store' do
       expect(mock_store).to receive(:fail).with(100)
@@ -158,7 +158,7 @@ RSpec.describe 'Async::Background::Runner#run_queue_job', type: :unit do
   end
 
   describe 'generic exception path' do
-    let(:job) { { id: 200, class_name: 'RunQueueJobSpec_Raises', args: ['x'] } }
+    let(:job) { { id: 200, class_name: 'RunQueueJobSpec_Raises', args: ['x'], options: {} } }
 
     it 'marks the job as failed in the store when perform raises' do
       expect(mock_store).to receive(:fail).with(200)
@@ -187,7 +187,7 @@ RSpec.describe 'Async::Background::Runner#run_queue_job', type: :unit do
     end
 
     it 'still calls store.fail when the job class itself cannot be resolved' do
-      job_unknown = { id: 300, class_name: 'NoSuchJobClassXYZ', args: [] }
+      job_unknown = { id: 300, class_name: 'NoSuchJobClassXYZ', args: [], options: {} }
 
       expect(mock_store).to receive(:fail).with(300)
 
@@ -204,15 +204,15 @@ RSpec.describe 'Async::Background::Runner#run_queue_job', type: :unit do
 
       expect(runner.metrics).to receive(:job_started).ordered
       expect(runner.metrics).to receive(:job_finished).ordered
-      runner.send(:run_queue_job, passthrough_task, { id: 1, class_name: 'RunQueueJobSpec_Ok', args: [] })
+      runner.send(:run_queue_job, passthrough_task, { id: 1, class_name: 'RunQueueJobSpec_Ok', args: [], options: {} })
 
       expect(runner.metrics).to receive(:job_started).ordered
       expect(runner.metrics).to receive(:job_timed_out).ordered
-      runner.send(:run_queue_job, timeout_task, { id: 2, class_name: 'RunQueueJobSpec_Slow', args: [] })
+      runner.send(:run_queue_job, timeout_task, { id: 2, class_name: 'RunQueueJobSpec_Slow', args: [], options: {} })
 
       expect(runner.metrics).to receive(:job_started).ordered
       expect(runner.metrics).to receive(:job_failed).ordered
-      runner.send(:run_queue_job, passthrough_task, { id: 3, class_name: 'RunQueueJobSpec_Raises', args: [] })
+      runner.send(:run_queue_job, passthrough_task, { id: 3, class_name: 'RunQueueJobSpec_Raises', args: [], options: {} })
     end
   end
 end

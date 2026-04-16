@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.6.2
+
+### Features
+- **Configurable timeout for queue jobs** — queue jobs previously used a hardcoded 30-second timeout (`DEFAULT_TIMEOUT`). Now configurable via `options` hash at two levels:
+  ```ruby
+  # Class-level default
+  class HeavyImportJob
+    include Async::Background::Job
+    options timeout: 600
+
+    def perform(user_id) = # ...
+  end
+
+  # Call-site override (wins over class-level)
+  HeavyImportJob.perform_async(user_id, options: { timeout: 120 })
+  ```
+  Priority: call-site `options:` → class-level `options` → `DEFAULT_TIMEOUT` (30s). Options are merged at enqueue time so the runner simply reads the final value from the payload
+- **`options:` hash across the entire enqueue chain** — single extensible contract from `perform_async` through `Client` down to `Store`. Currently supports `:timeout`, designed to accommodate future keys (e.g. `:retry`) without API changes
+- **`Job::Options` schema via `Data.define`** — declares known option keys with types and defaults. Unknown keys raise `ArgumentError`, invalid types raise `TypeError`. No manual validation code
+- **`options TEXT` column in SQLite** — stores the merged options hash as JSON. Extensible without schema changes when new options are added
+
+### Improvements
+- **Queue timeout logged on failure** — `run_queue_job` error log now includes actual timeout value: `"timed out after 120s"` instead of generic `"timed out"`
+- **Idempotent schema migration** — existing databases get `ALTER TABLE jobs ADD COLUMN options TEXT` on first connection, wrapped in `rescue nil` for safe re-runs. New databases include the column in `CREATE TABLE`
+
 ## 0.6.1
 
 ### Bug Fixes
