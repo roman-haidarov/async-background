@@ -20,7 +20,7 @@ RSpec.describe Async::Background::Queue::Client, type: :unit do
 
   describe '#push' do
     it 'enqueues job with immediate execution' do
-      expect(mock_store).to receive(:enqueue).with('TestJob', ['arg1', 'arg2'], nil).and_return(42)
+      expect(mock_store).to receive(:enqueue).with('TestJob', ['arg1', 'arg2'], nil, options: {}).and_return(42)
       expect(mock_notifier).to receive(:notify_all)
 
       result = client.push('TestJob', ['arg1', 'arg2'])
@@ -29,7 +29,7 @@ RSpec.describe Async::Background::Queue::Client, type: :unit do
 
     it 'enqueues job with specific run_at time' do
       future_time = Time.now.to_f + 3600
-      expect(mock_store).to receive(:enqueue).with('DelayedJob', ['arg'], future_time).and_return(24)
+      expect(mock_store).to receive(:enqueue).with('DelayedJob', ['arg'], future_time, options: {}).and_return(24)
       expect(mock_notifier).to receive(:notify_all)
 
       result = client.push('DelayedJob', ['arg'], future_time)
@@ -37,7 +37,7 @@ RSpec.describe Async::Background::Queue::Client, type: :unit do
     end
 
     it 'handles empty arguments' do
-      expect(mock_store).to receive(:enqueue).with('EmptyJob', [], nil).and_return(1)
+      expect(mock_store).to receive(:enqueue).with('EmptyJob', [], nil, options: {}).and_return(1)
       expect(mock_notifier).to receive(:notify_all)
 
       client.push('EmptyJob', [])
@@ -45,7 +45,7 @@ RSpec.describe Async::Background::Queue::Client, type: :unit do
 
     it 'works without notifier' do
       client_without_notifier = described_class.new(store: mock_store)
-      expect(mock_store).to receive(:enqueue).with('TestJob', [], nil).and_return(1)
+      expect(mock_store).to receive(:enqueue).with('TestJob', [], nil, options: {}).and_return(1)
 
       expect { client_without_notifier.push('TestJob', []) }.not_to raise_error
     end
@@ -58,7 +58,7 @@ RSpec.describe Async::Background::Queue::Client, type: :unit do
         [true, false, nil]
       ]
 
-      expect(mock_store).to receive(:enqueue).with('ComplexJob', complex_args, nil).and_return(99)
+      expect(mock_store).to receive(:enqueue).with('ComplexJob', complex_args, nil, options: {}).and_return(99)
       expect(mock_notifier).to receive(:notify_all)
 
       client.push('ComplexJob', complex_args)
@@ -77,7 +77,7 @@ RSpec.describe Async::Background::Queue::Client, type: :unit do
       delay = 300
       before_time = Time.now.to_f
 
-      expect(mock_store).to receive(:enqueue) do |class_name, args, run_at|
+      expect(mock_store).to receive(:enqueue) do |class_name, args, run_at, **_opts|
         expect(class_name).to eq('DelayedJob')
         expect(args).to eq(['arg1'])
         expect(run_at).to be_within(1.0).of(before_time + delay)
@@ -93,7 +93,7 @@ RSpec.describe Async::Background::Queue::Client, type: :unit do
       delay = 30.5
       before_time = Time.now.to_f
 
-      expect(mock_store).to receive(:enqueue) do |_class_name, _args, run_at|
+      expect(mock_store).to receive(:enqueue) do |_class_name, _args, run_at, **_opts|
         expect(run_at).to be_within(1.0).of(before_time + delay)
         1
       end
@@ -105,7 +105,7 @@ RSpec.describe Async::Background::Queue::Client, type: :unit do
     it 'handles zero delay' do
       before_time = Time.now.to_f
 
-      expect(mock_store).to receive(:enqueue) do |_class_name, _args, run_at|
+      expect(mock_store).to receive(:enqueue) do |_class_name, _args, run_at, **_opts|
         expect(run_at).to be_within(1.0).of(before_time)
         1
       end
@@ -117,7 +117,7 @@ RSpec.describe Async::Background::Queue::Client, type: :unit do
     it 'handles negative delay (job runs immediately)' do
       before_time = Time.now.to_f
 
-      expect(mock_store).to receive(:enqueue) do |_class_name, _args, run_at|
+      expect(mock_store).to receive(:enqueue) do |_class_name, _args, run_at, **_opts|
         expect(run_at).to be_within(1.0).of(before_time - 10)
         1
       end
@@ -133,7 +133,7 @@ RSpec.describe Async::Background::Queue::Client, type: :unit do
         time = Time.parse('2025-12-25 12:00:00 UTC')
         expected_timestamp = time.to_f
 
-        expect(mock_store).to receive(:enqueue).with('ChristmasJob', ['ho ho ho'], expected_timestamp).and_return(25)
+        expect(mock_store).to receive(:enqueue).with('ChristmasJob', ['ho ho ho'], expected_timestamp, options: {}).and_return(25)
         expect(mock_notifier).to receive(:notify_all)
 
         result = client.push_at(time, 'ChristmasJob', ['ho ho ho'])
@@ -145,7 +145,7 @@ RSpec.describe Async::Background::Queue::Client, type: :unit do
       it 'converts float timestamp via to_f' do
         timestamp = 1735128000.0
 
-        expect(mock_store).to receive(:enqueue).with('TimestampJob', ['arg'], timestamp).and_return(100)
+        expect(mock_store).to receive(:enqueue).with('TimestampJob', ['arg'], timestamp, options: {}).and_return(100)
         expect(mock_notifier).to receive(:notify_all)
 
         result = client.push_at(timestamp, 'TimestampJob', ['arg'])
@@ -155,7 +155,7 @@ RSpec.describe Async::Background::Queue::Client, type: :unit do
       it 'converts integer timestamps to float' do
         timestamp = 1735128000
 
-        expect(mock_store).to receive(:enqueue).with('IntegerJob', [], timestamp.to_f).and_return(101)
+        expect(mock_store).to receive(:enqueue).with('IntegerJob', [], timestamp.to_f, options: {}).and_return(101)
         expect(mock_notifier).to receive(:notify_all)
 
         client.push_at(timestamp, 'IntegerJob', [])
@@ -166,7 +166,7 @@ RSpec.describe Async::Background::Queue::Client, type: :unit do
       it 'converts objects that respond to to_f' do
         time_like = double('TimeObject', to_f: 1735128000.0)
 
-        expect(mock_store).to receive(:enqueue).with('TimelikeJob', [], 1735128000.0).and_return(102)
+        expect(mock_store).to receive(:enqueue).with('TimelikeJob', [], 1735128000.0, options: {}).and_return(102)
         expect(mock_notifier).to receive(:notify_all)
 
         client.push_at(time_like, 'TimelikeJob', [])
@@ -176,7 +176,7 @@ RSpec.describe Async::Background::Queue::Client, type: :unit do
         opaque = Object.new
         def opaque.respond_to?(_, _ = false); false; end
 
-        expect(mock_store).to receive(:enqueue).with('OpaqueJob', [], opaque).and_return(103)
+        expect(mock_store).to receive(:enqueue).with('OpaqueJob', [], opaque, options: {}).and_return(103)
         expect(mock_notifier).to receive(:notify_all)
 
         client.push_at(opaque, 'OpaqueJob', [])
@@ -192,7 +192,7 @@ RSpec.describe Async::Background::Queue::Client, type: :unit do
     end
 
     it 'currently propagates notifier errors after the job has been persisted' do
-      expect(mock_store).to receive(:enqueue).with('TestJob', [], nil).and_return(1)
+      expect(mock_store).to receive(:enqueue).with('TestJob', [], nil, options: {}).and_return(1)
       expect(mock_notifier).to receive(:notify_all).and_raise(StandardError, 'Notification failed')
 
       expect { client.push('TestJob', []) }.to raise_error(StandardError, 'Notification failed')
@@ -202,7 +202,7 @@ RSpec.describe Async::Background::Queue::Client, type: :unit do
   describe 'integration scenarios' do
     it 'handles rapid successive enqueues' do
       received_classes = []
-      allow(mock_store).to receive(:enqueue) do |class_name, _args, _run_at|
+      allow(mock_store).to receive(:enqueue) do |class_name, _args, _run_at, **_opts|
         received_classes << class_name
         received_classes.size
       end
@@ -218,14 +218,14 @@ RSpec.describe Async::Background::Queue::Client, type: :unit do
     it 'handles mixed job types' do
       before_time = Time.now.to_f
 
-      expect(mock_store).to receive(:enqueue).with('ImmediateJob', ['now'], nil).and_return(1)
-      expect(mock_store).to receive(:enqueue) do |class_name, args, run_at|
+      expect(mock_store).to receive(:enqueue).with('ImmediateJob', ['now'], nil, options: {}).and_return(1)
+      expect(mock_store).to receive(:enqueue) do |class_name, args, run_at, **_opts|
         expect(class_name).to eq('DelayedJob')
         expect(args).to eq(['later'])
         expect(run_at).to be_within(1.0).of(before_time + 60)
         2
       end
-      expect(mock_store).to receive(:enqueue).with('ScheduledJob', ['scheduled'], 1735128000.0).and_return(3)
+      expect(mock_store).to receive(:enqueue).with('ScheduledJob', ['scheduled'], 1735128000.0, options: {}).and_return(3)
       expect(mock_notifier).to receive(:notify_all).exactly(3).times
 
       client.push('ImmediateJob', ['now'])
@@ -260,13 +260,13 @@ RSpec.describe Async::Background::Queue::Client, type: :unit do
     end
 
     it 'enqueue accepts a class' do
-      expect(mock_store).to receive(:enqueue).with('ModuleApiTestJob', [1, 2], nil).and_return(1)
+      expect(mock_store).to receive(:enqueue).with('ModuleApiTestJob', [1, 2], nil, options: {}).and_return(1)
       expect(mock_notifier).to receive(:notify_all)
       Async::Background::Queue.enqueue(job_class, 1, 2)
     end
 
     it 'enqueue accepts a string class name' do
-      expect(mock_store).to receive(:enqueue).with('SomeJob', ['x'], nil).and_return(1)
+      expect(mock_store).to receive(:enqueue).with('SomeJob', ['x'], nil, options: {}).and_return(1)
       expect(mock_notifier).to receive(:notify_all)
       Async::Background::Queue.enqueue('SomeJob', 'x')
     end

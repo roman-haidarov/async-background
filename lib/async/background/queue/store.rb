@@ -15,6 +15,7 @@ module Async
             id         INTEGER PRIMARY KEY,
             class_name TEXT    NOT NULL,
             args       TEXT    NOT NULL DEFAULT '[]',
+            options    TEXT,
             status     TEXT    NOT NULL DEFAULT 'pending',
             created_at REAL    NOT NULL,
             run_at     REAL    NOT NULL,
@@ -45,6 +46,7 @@ module Async
         def initialize(path: self.class.default_path, mmap: true)
           @path = path
           @mmap = mmap
+          @pragma_sql = PRAGMAS.call(mmap ? MMAP_SIZE : 0).freeze
           @db   = nil
           @schema_checked = false
           @last_cleanup_at = nil
@@ -54,17 +56,18 @@ module Async
           require_sqlite3
           db = SQLite3::Database.new(@path)
           db.execute('PRAGMA busy_timeout = 5000')
-          db.execute_batch(PRAGMAS.call(@mmap ? MMAP_SIZE : 0))
+          db.execute_batch(@pragma_sql)
           db.execute_batch(SCHEMA)
           db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
           db.close
           @schema_checked = true
         end
 
-        def enqueue(class_name, args = [], run_at = nil)
+        def enqueue(class_name, args = [], run_at = nil, options: {})
           ensure_connection
           run_at ||= realtime_now
-          @enqueue_stmt.execute(class_name, JSON.generate(args), realtime_now, run_at)
+          options_json = options.empty? ? nil : JSON.generate(options)
+          @enqueue_stmt.execute(class_name, JSON.generate(args), options_json, realtime_now, run_at)
           @db.last_insert_row_id
         end
 
@@ -84,7 +87,8 @@ module Async
           return unless row
 
           maybe_cleanup
-          { id: row[0], class_name: row[1], args: JSON.parse(row[2]) }
+          options = row[3] ? JSON.parse(row[3], symbolize_names: true) : {}
+          { id: row[0], class_name: row[1], args: JSON.parse(row[2]), options: options }
         rescue
           @db.execute("ROLLBACK") rescue nil
           raise
@@ -135,10 +139,11 @@ module Async
           finalize_statements
           @db = SQLite3::Database.new(@path)
           @db.execute('PRAGMA busy_timeout = 5000')
-          @db.execute_batch(PRAGMAS.call(@mmap ? MMAP_SIZE : 0))
+          @db.execute_batch(@pragma_sql)
 
           unless @schema_checked
             @db.execute_batch(SCHEMA)
+            @db.execute("ALTER TABLE jobs ADD COLUMN options TEXT") rescue nil
             @schema_checked = true
           end
 
@@ -148,7 +153,7 @@ module Async
 
         def prepare_statements
           @enqueue_stmt = @db.prepare(
-            "INSERT INTO jobs (class_name, args, created_at, run_at) VALUES (?, ?, ?, ?)"
+            "INSERT INTO jobs (class_name, args, options, created_at, run_at) VALUES (?, ?, ?, ?, ?)"
           )
 
           @fetch_stmt = @db.prepare(<<~SQL)
@@ -160,7 +165,7 @@ module Async
               ORDER BY run_at, id
               LIMIT 1
             )
-            RETURNING id, class_name, args
+            RETURNING id, class_name, args, options
           SQL
 
           @complete_stmt = @db.prepare("UPDATE jobs SET status = 'done' WHERE id = ?")
@@ -175,11 +180,11 @@ module Async
         end
 
         def finalize_statements
-          %i[enqueue_stmt fetch_stmt complete_stmt fail_stmt requeue_stmt cleanup_stmt].each do |name|
-            stmt = instance_variable_get(:"@#{name}")
-            stmt&.close rescue nil
-            instance_variable_set(:"@#{name}", nil)
+          [@enqueue_stmt, @fetch_stmt, @complete_stmt, @fail_stmt, @requeue_stmt, @cleanup_stmt].each do |s|
+            s&.close rescue next
           end
+
+          @enqueue_stmt = @fetch_stmt = @complete_stmt = @fail_stmt = @requeue_stmt = @cleanup_stmt = nil
         end
 
         def maybe_cleanup
@@ -193,7 +198,6 @@ module Async
             @db.execute("PRAGMA incremental_vacuum")
           end
         end
-
       end
     end
   end
