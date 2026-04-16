@@ -13,18 +13,18 @@ module Async
           @notifier = notifier
         end
 
-        def push(class_name, args = [], run_at = nil, options: nil)
+        def push(class_name, args = [], run_at = nil, options: {})
           id = @store.enqueue(class_name, args, run_at, options: options)
           @notifier&.notify_all
           id
         end
 
-        def push_in(delay, class_name, args = [], options: nil)
+        def push_in(delay, class_name, args = [], options: {})
           run_at = realtime_now + delay.to_f
           push(class_name, args, run_at, options: options)
         end
 
-        def push_at(time, class_name, args = [], options: nil)
+        def push_at(time, class_name, args = [], options: {})
           run_at = time.respond_to?(:to_f) ? time.to_f : time
           push(class_name, args, run_at, options: options)
         end
@@ -55,7 +55,7 @@ module Async
 
         def build_options(job_class, call_site_options)
           merged = resolve_options(job_class).merge!(call_site_options.compact)
-          return nil if merged.empty?
+          return {} if merged.empty?
 
           Job::Options.new(**merged).to_h
         end

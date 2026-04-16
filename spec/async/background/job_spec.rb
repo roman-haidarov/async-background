@@ -30,7 +30,7 @@ RSpec.describe Async::Background::Job, type: :unit do
 
   describe '.perform_async' do
     it 'enqueues job with correct parameters' do
-      expect(mock_client).to receive(:push).with('TestJob', ['arg1', 'arg2'], nil, options: nil)
+      expect(mock_client).to receive(:push).with('TestJob', ['arg1', 'arg2'], nil, options: {})
 
       test_job_class.perform_async('arg1', 'arg2')
     end
@@ -51,19 +51,19 @@ RSpec.describe Async::Background::Job, type: :unit do
 
   describe '.perform_in' do
     it 'enqueues job with delay' do
-      expect(mock_client).to receive(:push_in).with(300, 'TestJob', ['arg1'], options: nil)
+      expect(mock_client).to receive(:push_in).with(300, 'TestJob', ['arg1'], options: {})
 
       test_job_class.perform_in(300, 'arg1')
     end
 
     it 'accepts delay as integer seconds' do
-      expect(mock_client).to receive(:push_in).with(60, 'TestJob', [], options: nil)
+      expect(mock_client).to receive(:push_in).with(60, 'TestJob', [], options: {})
 
       test_job_class.perform_in(60)
     end
 
     it 'accepts delay as float seconds' do
-      expect(mock_client).to receive(:push_in).with(30.5, 'TestJob', ['test'], options: nil)
+      expect(mock_client).to receive(:push_in).with(30.5, 'TestJob', ['test'], options: {})
 
       test_job_class.perform_in(30.5, 'test')
     end
@@ -73,21 +73,21 @@ RSpec.describe Async::Background::Job, type: :unit do
     let(:future_time) { Time.now + 3600 }
 
     it 'enqueues job at specific time' do
-      expect(mock_client).to receive(:push_at).with(future_time, 'TestJob', ['arg1'], options: nil)
+      expect(mock_client).to receive(:push_at).with(future_time, 'TestJob', ['arg1'], options: {})
 
       test_job_class.perform_at(future_time, 'arg1')
     end
 
     it 'accepts Time object' do
       time = Time.parse('2025-01-01 12:00:00')
-      expect(mock_client).to receive(:push_at).with(time, 'TestJob', [], options: nil)
+      expect(mock_client).to receive(:push_at).with(time, 'TestJob', [], options: {})
 
       test_job_class.perform_at(time)
     end
 
     it 'accepts timestamp as float' do
       timestamp = 1735732800.0
-      expect(mock_client).to receive(:push_at).with(timestamp, 'TestJob', ['test'], options: nil)
+      expect(mock_client).to receive(:push_at).with(timestamp, 'TestJob', ['test'], options: {})
 
       test_job_class.perform_at(timestamp, 'test')
     end
@@ -117,7 +117,7 @@ RSpec.describe Async::Background::Job, type: :unit do
       end
 
       it 'uses actual class name' do
-        expect(mock_client).to receive(:push).with('MySpecialJob', ['test'], nil, options: nil)
+        expect(mock_client).to receive(:push).with('MySpecialJob', ['test'], nil, options: {})
 
         named_job.perform_async('test')
       end
@@ -135,7 +135,7 @@ RSpec.describe Async::Background::Job, type: :unit do
           def self.perform_now(*); end
         end
 
-        expect(mock_client).to receive(:push).with('CustomJobName', ['test'], nil, options: nil)
+        expect(mock_client).to receive(:push).with('CustomJobName', ['test'], nil, options: {})
 
         anonymous_job.perform_async('test')
       end
@@ -144,13 +144,13 @@ RSpec.describe Async::Background::Job, type: :unit do
 
   describe 'argument handling' do
     it 'handles no arguments' do
-      expect(mock_client).to receive(:push).with('TestJob', [], nil, options: nil)
+      expect(mock_client).to receive(:push).with('TestJob', [], nil, options: {})
 
       test_job_class.perform_async
     end
 
     it 'handles multiple arguments' do
-      expect(mock_client).to receive(:push).with('TestJob', [1, 'string', { key: 'value' }, [1, 2, 3]], nil, options: nil)
+      expect(mock_client).to receive(:push).with('TestJob', [1, 'string', { key: 'value' }, [1, 2, 3]], nil, options: {})
 
       test_job_class.perform_async(1, 'string', { key: 'value' }, [1, 2, 3])
     end

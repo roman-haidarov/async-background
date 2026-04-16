@@ -62,10 +62,10 @@ module Async
           @schema_checked = true
         end
 
-        def enqueue(class_name, args = [], run_at = nil, options: nil)
+        def enqueue(class_name, args = [], run_at = nil, options: {})
           ensure_connection
           run_at ||= realtime_now
-          options_json = options && !options.empty? ? JSON.generate(options) : nil
+          options_json = options.empty? ? nil : JSON.generate(options)
           @enqueue_stmt.execute(class_name, JSON.generate(args), options_json, realtime_now, run_at)
           @db.last_insert_row_id
         end
