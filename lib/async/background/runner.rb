@@ -114,11 +114,13 @@ module Async
         class_name = job[:class_name]
         args       = job[:args]
         klass      = resolve_job_class(class_name)
+        opts       = Job::Options.new(**job[:options])
+        timeout    = opts.timeout
 
         metrics.job_started(nil)
         t = monotonic_now
 
-        job_task.with_timeout(DEFAULT_TIMEOUT) { klass.perform_now(*args) }
+        job_task.with_timeout(timeout) { klass.perform_now(*args) }
 
         duration = monotonic_now - t
         metrics.job_finished(nil, duration)
@@ -130,7 +132,7 @@ module Async
       rescue ::Async::TimeoutError
         metrics.job_timed_out(nil)
         @queue_store.fail(job[:id])
-        logger.error('Async::Background') { "queue(#{class_name}): timed out" }
+        logger.error('Async::Background') { "queue(#{class_name}): timed out after #{timeout}s" }
       rescue => e
         metrics.job_failed(nil, e)
         @queue_store.fail(job[:id])
