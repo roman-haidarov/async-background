@@ -186,10 +186,11 @@ RSpec.describe 'Async::Background::Runner#run_queue_job', type: :unit do
       }.not_to raise_error
     end
 
-    it 'still delegates unknown job classes to retry_or_fail' do
+    it 'fails fast for unknown job classes instead of retrying them' do
       job_unknown = { id: 300, class_name: 'NoSuchJobClassXYZ', args: [], options: {} }
 
-      expect(mock_store).to receive(:retry_or_fail).with(300, options: kind_of(Async::Background::Job::Options)).and_return(:failed)
+      expect(mock_store).to receive(:fail).with(300)
+      expect(mock_store).not_to receive(:retry_or_fail)
 
       expect {
         runner.send(:run_queue_job, passthrough_task, job_unknown)

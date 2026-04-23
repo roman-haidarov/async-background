@@ -223,6 +223,15 @@ RSpec.describe Async::Background::Job, type: :unit do
       }.to raise_error(ArgumentError, /retry_delay is required/)
     end
 
+    it 'requires retry_delay to be strictly positive when retry is enabled' do
+      expect {
+        Class.new do
+          include Async::Background::Job
+          options retry: 2, retry_delay: 0
+        end
+      }.to raise_error(ArgumentError, /retry_delay must be > 0/)
+    end
+
     it 'tracks retry attempts inside options' do
       options = Async::Background::Job::Options.new(retry: 2, retry_delay: 4, backoff: :linear)
 

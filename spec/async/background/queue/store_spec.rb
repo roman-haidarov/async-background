@@ -345,6 +345,19 @@ RSpec.describe Async::Background::Queue::Store, type: :unit do
       row = db.execute("SELECT status FROM jobs WHERE id = ?", [job_id]).first
       expect(row[0]).to eq('failed')
     end
+
+    it 'uses the stored retry policy as the source of truth' do
+      job_id = store.enqueue('RetryJob', [], Time.now.to_f - 1, options: retry_options.to_h.compact)
+      store.fetch(worker_id)
+
+      conflicting_options = Async::Background::Job::Options.new(retry: 0, retry_delay: 99)
+
+      expect(store.retry_or_fail(job_id, options: conflicting_options)).to eq(:retried)
+
+      row = db.execute("SELECT status, options FROM jobs WHERE id = ?", [job_id]).first
+      expect(row[0]).to eq('pending')
+      expect(JSON.parse(row[1])).to include('retry' => 2, 'retry_delay' => 5.0, 'attempt' => 1)
+    end
   end
 
   describe '#recover' do

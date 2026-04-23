@@ -6,12 +6,13 @@ module Async
   module Background
     module Queue
       EMPTY_OPTIONS = {}.freeze
+      RETRY_OPTION_KEYS = %i[retry retry_delay backoff].freeze
 
       class Client
         include Clock
 
         def initialize(store:, notifier: nil)
-          @store    = store
+          @store = store
           @notifier = notifier
         end
 
@@ -22,13 +23,17 @@ module Async
         end
 
         def push_in(delay, class_name, args = [], options: {})
-          run_at = realtime_now + delay.to_f
-          push(class_name, args, run_at, options: options)
+          push(class_name, args, realtime_now + delay.to_f, options: options)
         end
 
         def push_at(time, class_name, args = [], options: {})
-          run_at = time.respond_to?(:to_f) ? time.to_f : time
-          push(class_name, args, run_at, options: options)
+          push(class_name, args, normalize_run_at(time), options: options)
+        end
+
+        private
+
+        def normalize_run_at(time)
+          time.respond_to?(:to_f) ? time.to_f : time
         end
       end
 
@@ -36,34 +41,67 @@ module Async
         attr_accessor :default_client
 
         def enqueue(job_class, *args, options: {})
-          ensure_configured!
-          merged = build_options(job_class, options)
-          default_client.push(resolve_class_name(job_class), args, nil, options: merged)
+          push_via_default_client(:push, job_class, args, nil, options)
         end
 
         def enqueue_in(delay, job_class, *args, options: {})
-          ensure_configured!
-          merged = build_options(job_class, options)
-          default_client.push_in(delay, resolve_class_name(job_class), args, options: merged)
+          push_via_default_client(:push_in, job_class, args, delay, options)
         end
 
         def enqueue_at(time, job_class, *args, options: {})
-          ensure_configured!
-          merged = build_options(job_class, options)
-          default_client.push_at(time, resolve_class_name(job_class), args, options: merged)
+          push_via_default_client(:push_at, job_class, args, time, options)
         end
 
         private
 
-        def build_options(job_class, call_site_options)
-          merged = resolve_options(job_class).merge!(call_site_options)
-          return EMPTY_OPTIONS if merged.empty?
+        def push_via_default_client(method_name, job_class, args, schedule_arg, call_site_options)
+          ensure_configured!
 
-          Job::Options.new(**merged).to_h.compact
+          merged_options = build_options(job_class, call_site_options)
+          class_name = resolve_class_name(job_class)
+
+          case method_name
+          when :push
+            default_client.public_send(method_name, class_name, args, nil, options: merged_options)
+          when :push_in, :push_at
+            default_client.public_send(method_name, schedule_arg, class_name, args, options: merged_options)
+          else
+            raise ArgumentError, "Unsupported enqueue method: #{method_name.inspect}"
+          end
+        end
+
+        def build_options(job_class, call_site_options)
+          merged = resolve_options(job_class)
+          explicit = normalize_call_site_options(call_site_options)
+
+          merged.merge!(explicit.compact)
+          apply_retry_overrides!(merged, explicit) if active_retry_override?(explicit)
+
+          normalize_options_hash(merged)
+        end
+
+        def normalize_call_site_options(options)
+          (options || {}).dup
+        end
+
+        def active_retry_override?(options)
+          RETRY_OPTION_KEYS.any? { |key| options.key?(key) && !options[key].nil? }
+        end
+
+        def apply_retry_overrides!(merged, explicit)
+          RETRY_OPTION_KEYS.each do |key|
+            merged[key] = explicit[key] if explicit.key?(key)
+          end
+        end
+
+        def normalize_options_hash(options)
+          return EMPTY_OPTIONS if options.empty?
+
+          Job::Options.new(**options).to_h.compact
         end
 
         def ensure_configured!
-          raise "Async::Background::Queue not configured" unless default_client
+          raise 'Async::Background::Queue not configured' unless default_client
         end
 
         def resolve_class_name(job_class)

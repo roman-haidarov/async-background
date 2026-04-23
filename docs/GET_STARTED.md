@@ -206,6 +206,26 @@ class HeavySyncJob
 end
 ```
 
+Queue jobs can also opt into retries:
+
+```ruby
+class SendWebhookJob
+  include Async::Background::Job
+
+  options timeout: 30, retry: 5, retry_delay: 10, backoff: :exponential
+
+  def perform(endpoint_id)
+    Endpoint.find(endpoint_id).deliver!
+  end
+end
+```
+
+- `retry`: maximum number of retry attempts after the initial run.
+- `retry_delay`: base delay in seconds between attempts. Must be strictly greater than `0`.
+- `backoff`: one of `:fixed`, `:linear`, `:exponential`.
+
+> Retry options apply to **queue jobs only** (`perform_async`, `perform_in`, `perform_at`). Cron / interval jobs from the YAML schedule continue to use the existing scheduler path and are **not** retried by the queue store.
+
 Now you have three ways to enqueue:
 
 ```ruby

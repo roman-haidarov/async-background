@@ -17,14 +17,20 @@ module Async
       end
 
       def reschedule(monotonic_now)
-        if interval
-          @next_run_at += interval
-          @next_run_at = monotonic_now + interval if @next_run_at <= monotonic_now
-        else
-          now_wall = Time.now
-          wait = cron.next_time(now_wall).to_f - now_wall.to_f
-          @next_run_at = monotonic_now + [wait, Async::Background::MIN_SLEEP_TIME].max
-        end
+        !interval.nil? ? reschedule_interval(monotonic_now) : reschedule_cron(monotonic_now)
+      end
+
+      private
+
+      def reschedule_interval(monotonic_now)
+        @next_run_at += interval
+        @next_run_at = monotonic_now + interval if @next_run_at <= monotonic_now
+      end
+
+      def reschedule_cron(monotonic_now)
+        now_wall = Time.now
+        wait = cron.next_time(now_wall).to_f - now_wall.to_f
+        @next_run_at = monotonic_now + [wait, Async::Background::MIN_SLEEP_TIME].max
       end
     end
   end

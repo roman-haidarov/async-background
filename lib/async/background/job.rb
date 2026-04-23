@@ -8,35 +8,21 @@ module Async
 
       Options = Data.define(:timeout, :retry, :retry_delay, :backoff, :attempt) do
         def initialize(**kwargs)
-          timeout_value = Integer(kwargs.fetch(:timeout, DEFAULT_TIMEOUT))
-          retry_value = Integer(kwargs.fetch(:retry, 0) || 0)
-          retry_delay_raw = kwargs.key?(:retry_delay) ? kwargs[:retry_delay] : nil
-          retry_delay_value = retry_delay_raw.nil? ? nil : Float(retry_delay_raw)
-          backoff_value = normalize_backoff(kwargs[:backoff])
-          attempt_raw = kwargs.key?(:attempt) ? kwargs[:attempt] : nil
-          attempt_value = attempt_raw.nil? ? nil : Integer(attempt_raw)
-
-          validate_timeout!(timeout_value)
-          validate_retry!(retry_value)
-          validate_retry_delay!(retry_value, retry_delay_value)
-          validate_backoff!(backoff_value)
-          validate_attempt!(attempt_value)
-
-          super(
-            timeout: timeout_value,
-            retry: retry_value,
-            retry_delay: retry_delay_value,
-            backoff: backoff_value,
-            attempt: attempt_value
-          )
+          values = normalize_values(kwargs)
+          validate_values!(values)
+          super(**values)
         end
 
         def retry?
-          __send__(:retry).positive?
+          retry_limit.positive?
+        end
+
+        def retry_limit
+          public_send(:retry)
         end
 
         def attempt_count
-          Integer(__send__(:attempt) || 0)
+          public_send(:attempt) || 0
         end
 
         def next_attempt
@@ -46,21 +32,16 @@ module Async
         def next_retry_delay(attempt = next_attempt)
           attempt = Integer(attempt)
           raise ArgumentError, "attempt must be > 0" unless attempt.positive?
-
-          delay = __send__(:retry_delay)
-          strategy = __send__(:backoff) || :fixed
-
+          delay = public_send(:retry_delay)
           raise ArgumentError, "retry_delay must be configured when retry is enabled" unless delay
 
-          case strategy
+          case backoff_strategy
           when :fixed
             delay
           when :linear
             delay * attempt
           when :exponential
             delay * (2**(attempt - 1))
-          else
-            raise ArgumentError, "Unsupported backoff: #{strategy.inspect}"
           end
         end
 
@@ -70,26 +51,61 @@ module Async
 
         private
 
-        def normalize_backoff(value)
-          return nil if value.nil?
+        def normalize_values(values)
+          {
+            timeout: coerce_timeout(values.fetch(:timeout, DEFAULT_TIMEOUT)),
+            retry: coerce_retry_limit(values.fetch(:retry, 0)),
+            retry_delay: coerce_optional_float(values, :retry_delay),
+            backoff: coerce_backoff(values[:backoff]),
+            attempt: coerce_optional_integer(values, :attempt)
+          }
+        end
 
-          value.to_sym
+        def validate_values!(values)
+          validate_timeout!(values[:timeout])
+          validate_retry_limit!(values[:retry])
+          validate_retry_delay!(values[:retry], values[:retry_delay])
+          validate_backoff!(values[:backoff])
+          validate_attempt!(values[:attempt])
+        end
+
+        def coerce_timeout(value)
+          Integer(value)
+        end
+
+        def coerce_retry_limit(value)
+          Integer(value || 0)
+        end
+
+        def coerce_optional_float(values, key)
+          return nil unless values.key?(key)
+          value = values[key]
+          value.nil? ? nil : Float(value)
+        end
+
+        def coerce_optional_integer(values, key)
+          return nil unless values.key?(key)
+          value = values[key]
+          value.nil? ? nil : Integer(value)
+        end
+
+        def coerce_backoff(value)
+          value&.to_sym
         end
 
         def validate_timeout!(value)
           raise ArgumentError, "timeout must be > 0" unless value.positive?
         end
 
-        def validate_retry!(value)
+        def validate_retry_limit!(value)
           raise ArgumentError, "retry must be >= 0" if value.negative?
         end
 
-        def validate_retry_delay!(retry_value, delay_value)
-          return if retry_value.zero? && delay_value.nil?
-          return if retry_value.zero? && !delay_value.nil?
+        def validate_retry_delay!(retry_limit, retry_delay)
+          return unless retry_limit.positive?
 
-          raise ArgumentError, "retry_delay is required when retry is enabled" if delay_value.nil?
-          raise ArgumentError, "retry_delay must be >= 0" if delay_value.negative?
+          raise ArgumentError, "retry_delay is required when retry is enabled" if retry_delay.nil?
+          raise ArgumentError, "retry_delay must be > 0" unless retry_delay.positive?
         end
 
         def validate_backoff!(value)
@@ -103,6 +119,11 @@ module Async
 
           raise ArgumentError, "attempt must be >= 0" if value.negative?
         end
+
+        def backoff_strategy
+          public_send(:backoff) || :fixed
+        end
+
       end
 
       def self.included(base)
@@ -127,10 +148,16 @@ module Async
         end
 
         def options(**values)
-          @options = Options.new(**values).to_h.compact
+          @options = normalize_options(values)
         end
 
         def resolve_options = @options || {}
+
+        private
+
+        def normalize_options(values)
+          Options.new(**values).to_h.compact
+        end
       end
 
       def perform(*args)

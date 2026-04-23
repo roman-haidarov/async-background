@@ -7,6 +7,14 @@ RSpec.describe Async::Background::Queue::Client, type: :unit do
   let(:mock_notifier) { instance_double('Async::Background::Queue::Notifier') }
   let(:client) { described_class.new(store: mock_store, notifier: mock_notifier) }
 
+  before do
+    @previous_client = Async::Background::Queue.default_client
+  end
+
+  after do
+    Async::Background::Queue.default_client = @previous_client
+  end
+
   describe '#initialize' do
     it 'creates client with store and notifier' do
       expect(client).to be_a(described_class)
@@ -15,6 +23,45 @@ RSpec.describe Async::Background::Queue::Client, type: :unit do
     it 'can be created without notifier' do
       client_without_notifier = described_class.new(store: mock_store)
       expect(client_without_notifier).to be_a(described_class)
+    end
+  end
+
+  describe '.enqueue option merging' do
+    let(:job_class) do
+      Class.new do
+        include Async::Background::Job
+
+        options timeout: 45, retry: 3, retry_delay: 10, backoff: :linear
+
+        def self.name
+          'ClientSpecConfiguredJob'
+        end
+
+        def perform(*); end
+      end
+    end
+
+    it 'keeps class-level options when call-site values are nil' do
+      Async::Background::Queue.default_client = client
+
+      expect(mock_store).to receive(:enqueue).with(
+        'ClientSpecConfiguredJob',
+        ['arg1'],
+        nil,
+        options: {
+          timeout: 45,
+          retry: 3,
+          retry_delay: 10.0,
+          backoff: :linear
+        }
+      ).and_return(42)
+      expect(mock_notifier).to receive(:notify_all)
+
+      Async::Background::Queue.enqueue(
+        job_class,
+        'arg1',
+        options: { retry: nil, retry_delay: nil, backoff: nil }
+      )
     end
   end
 
