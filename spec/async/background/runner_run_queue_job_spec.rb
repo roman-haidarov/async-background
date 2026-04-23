@@ -101,9 +101,9 @@ RSpec.describe 'Async::Background::Runner#run_queue_job', type: :unit do
       runner.send(:run_queue_job, passthrough_task, job)
     end
 
-    it 'does not call store.fail on success' do
+    it 'does not call retry_or_fail on success' do
       expect(mock_store).to receive(:complete).with(42)
-      expect(mock_store).not_to receive(:fail)
+      expect(mock_store).not_to receive(:retry_or_fail)
 
       runner.send(:run_queue_job, passthrough_task, job)
     end
@@ -130,15 +130,15 @@ RSpec.describe 'Async::Background::Runner#run_queue_job', type: :unit do
   describe 'timeout path' do
     let(:job) { { id: 100, class_name: 'RunQueueJobSpec_Slow', args: [], options: {} } }
 
-    it 'marks the job as failed in the store' do
-      expect(mock_store).to receive(:fail).with(100)
+    it 'delegates timeout handling to retry_or_fail' do
+      expect(mock_store).to receive(:retry_or_fail).with(100, options: kind_of(Async::Background::Job::Options)).and_return(:failed)
       expect(mock_store).not_to receive(:complete)
 
       runner.send(:run_queue_job, timeout_task, job)
     end
 
     it 'updates metrics with job_timed_out' do
-      allow(mock_store).to receive(:fail)
+      allow(mock_store).to receive(:retry_or_fail).and_return(:failed)
 
       expect(runner.metrics).to receive(:job_started).with(nil).ordered
       expect(runner.metrics).to receive(:job_timed_out).with(nil).ordered
@@ -149,7 +149,7 @@ RSpec.describe 'Async::Background::Runner#run_queue_job', type: :unit do
     end
 
     it 'does not propagate the TimeoutError to the caller' do
-      allow(mock_store).to receive(:fail)
+      allow(mock_store).to receive(:retry_or_fail).and_return(:failed)
 
       expect {
         runner.send(:run_queue_job, timeout_task, job)
@@ -160,15 +160,15 @@ RSpec.describe 'Async::Background::Runner#run_queue_job', type: :unit do
   describe 'generic exception path' do
     let(:job) { { id: 200, class_name: 'RunQueueJobSpec_Raises', args: ['x'], options: {} } }
 
-    it 'marks the job as failed in the store when perform raises' do
-      expect(mock_store).to receive(:fail).with(200)
+    it 'delegates errors to retry_or_fail when perform raises' do
+      expect(mock_store).to receive(:retry_or_fail).with(200, options: kind_of(Async::Background::Job::Options)).and_return(:failed)
       expect(mock_store).not_to receive(:complete)
 
       runner.send(:run_queue_job, passthrough_task, job)
     end
 
     it 'updates metrics with job_failed' do
-      allow(mock_store).to receive(:fail)
+      allow(mock_store).to receive(:retry_or_fail).and_return(:failed)
 
       expect(runner.metrics).to receive(:job_started).with(nil).ordered
       expect(runner.metrics).to receive(:job_failed).with(nil, kind_of(StandardError)).ordered
@@ -179,17 +179,18 @@ RSpec.describe 'Async::Background::Runner#run_queue_job', type: :unit do
     end
 
     it 'does not propagate the exception to the caller' do
-      allow(mock_store).to receive(:fail)
+      allow(mock_store).to receive(:retry_or_fail).and_return(:failed)
 
       expect {
         runner.send(:run_queue_job, passthrough_task, job)
       }.not_to raise_error
     end
 
-    it 'still calls store.fail when the job class itself cannot be resolved' do
+    it 'fails fast for unknown job classes instead of retrying them' do
       job_unknown = { id: 300, class_name: 'NoSuchJobClassXYZ', args: [], options: {} }
 
       expect(mock_store).to receive(:fail).with(300)
+      expect(mock_store).not_to receive(:retry_or_fail)
 
       expect {
         runner.send(:run_queue_job, passthrough_task, job_unknown)
@@ -197,10 +198,28 @@ RSpec.describe 'Async::Background::Runner#run_queue_job', type: :unit do
     end
   end
 
+  describe 'retry behavior' do
+    let(:job) do
+      {
+        id: 500,
+        class_name: 'RunQueueJobSpec_Raises',
+        args: ['x'],
+        options: { retry: 3, retry_delay: 5, backoff: :exponential, attempt: 1 }
+      }
+    end
+
+    it 'delegates retry scheduling to the store when retries remain' do
+      expect(mock_store).to receive(:retry_or_fail).with(500, options: kind_of(Async::Background::Job::Options)).and_return(:retried)
+      expect(mock_store).not_to receive(:complete)
+
+      runner.send(:run_queue_job, passthrough_task, job)
+    end
+  end
+
   describe 'metrics interaction across all paths' do
     it 'always calls job_started before any terminal metric' do
       allow(mock_store).to receive(:complete)
-      allow(mock_store).to receive(:fail)
+      allow(mock_store).to receive(:retry_or_fail).and_return(:failed)
 
       expect(runner.metrics).to receive(:job_started).ordered
       expect(runner.metrics).to receive(:job_finished).ordered

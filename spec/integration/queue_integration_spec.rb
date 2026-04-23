@@ -201,4 +201,41 @@ RSpec.describe 'Queue Integration', type: :integration do
       expect(job[:args]).to eq(['precise_timing'])
     end
   end
+
+  describe 'retry option persistence' do
+    let(:retrying_job_class) do
+      Class.new do
+        include Async::Background::Job
+
+        options retry: 2, retry_delay: 3, backoff: :exponential
+
+        def self.name
+          'IntegrationRetryingJob'
+        end
+
+        def self.perform_now(*); end
+      end
+    end
+
+    it 'persists retry options through enqueue and fetch' do
+      job_id = retrying_job_class.perform_async('retryable', options: { timeout: 9 })
+      job = store.fetch(1)
+
+      expect(job[:id]).to eq(job_id)
+      expect(job[:options]).to eq(timeout: 9, retry: 2, retry_delay: 3.0, backoff: 'exponential')
+    end
+
+    it 'stores retry attempts inside options instead of separate columns' do
+      job_id = retrying_job_class.perform_async('retryable')
+      job = store.fetch(1)
+
+      store.retry_or_fail(job_id, options: Async::Background::Job::Options.new(**job[:options]))
+
+      db = store.instance_variable_get(:@db)
+      db.execute('UPDATE jobs SET run_at = ? WHERE id = ?', [Time.now.to_f - 1, job_id])
+
+      retried_job = store.fetch(1)
+      expect(retried_job[:options]).to eq(timeout: 120, retry: 2, retry_delay: 3.0, backoff: 'exponential', attempt: 1)
+    end
+  end
 end

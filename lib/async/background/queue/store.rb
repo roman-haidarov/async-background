@@ -44,19 +44,17 @@ module Async
         attr_reader :path
 
         def initialize(path: self.class.default_path, mmap: true)
-          @path = path
-          @mmap = mmap
-          @pragma_sql = PRAGMAS.call(mmap ? MMAP_SIZE : 0).freeze
-          @db   = nil
-          @schema_checked = false
+          @path            = path
+          @pragma_sql      = PRAGMAS.call(mmap ? MMAP_SIZE : 0).freeze
+          @db              = nil
+          @schema_checked  = false
           @last_cleanup_at = nil
         end
 
         def ensure_database!
           require_sqlite3
           db = SQLite3::Database.new(@path)
-          db.execute('PRAGMA busy_timeout = 5000')
-          db.execute_batch(@pragma_sql)
+          configure_database(db)
           db.execute_batch(SCHEMA)
           db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
           db.close
@@ -65,34 +63,22 @@ module Async
 
         def enqueue(class_name, args = [], run_at = nil, options: {})
           ensure_connection
-          run_at ||= realtime_now
-          options_json = options.empty? ? nil : JSON.generate(options)
-          @enqueue_stmt.execute(class_name, JSON.generate(args), options_json, realtime_now, run_at)
+          now = realtime_now
+          @enqueue_stmt.execute(class_name, JSON.generate(args), dump_options(options), now, run_at || now)
           @db.last_insert_row_id
         end
 
         def fetch(worker_id)
           ensure_connection
           now = realtime_now
-          @db.execute("BEGIN IMMEDIATE")
 
-          begin
-            results = @fetch_stmt.execute(worker_id, now, now)
-            row = results.first
-          ensure
-            @fetch_stmt.reset! rescue nil
-          end
-
-          @db.execute("COMMIT")
+          row = transaction { with_stmt(@fetch_stmt) { |s| s.execute(worker_id, now, now).first } }
           return unless row
 
           maybe_cleanup
-          options = row[3] ? JSON.parse(row[3], symbolize_names: true) : {}
-          { id: row[0], class_name: row[1], args: JSON.parse(row[2]), options: options }
-        rescue
-          @db.execute("ROLLBACK") rescue nil
-          raise
+          { id: row[0], class_name: row[1], args: JSON.parse(row[2]), options: load_options(row[3]) }
         end
+
         def complete(job_id)
           ensure_connection
           @complete_stmt.execute(job_id)
@@ -101,6 +87,24 @@ module Async
         def fail(job_id)
           ensure_connection
           @fail_stmt.execute(job_id)
+        end
+
+        def retry_or_fail(job_id, options: nil)
+          ensure_connection
+
+          transaction do
+            stored = with_stmt(@retry_state_stmt) { |s| load_options(s.execute(job_id).first&.first) }
+            policy = stored.empty? ? normalize_options(options) : Job::Options.new(**stored)
+
+            if policy&.retry? && policy.next_attempt <= policy.retry
+              advanced = policy.with_attempt(policy.next_attempt)
+              @retry_stmt.execute(realtime_now + advanced.next_retry_delay(advanced.attempt), dump_options(advanced.to_h.compact), job_id)
+              :retried
+            else
+              @fail_stmt.execute(job_id)
+              :failed
+            end
+          end
         end
 
         def recover(worker_id)
@@ -138,8 +142,7 @@ module Async
           require_sqlite3
           finalize_statements
           @db = SQLite3::Database.new(@path)
-          @db.execute('PRAGMA busy_timeout = 5000')
-          @db.execute_batch(@pragma_sql)
+          configure_database(@db)
 
           unless @schema_checked
             @db.execute_batch(SCHEMA)
@@ -149,6 +152,42 @@ module Async
 
           prepare_statements
           @last_cleanup_at = monotonic_now
+        end
+
+        def configure_database(db)
+          db.execute("PRAGMA busy_timeout = 5000")
+          db.execute_batch(@pragma_sql)
+        end
+
+        def transaction
+          @db.execute("BEGIN IMMEDIATE")
+          result = yield
+          @db.execute("COMMIT")
+          result
+        rescue
+          @db.execute("ROLLBACK") rescue nil
+          raise
+        end
+
+        def with_stmt(stmt)
+          yield stmt
+        ensure
+          stmt.reset! rescue nil
+        end
+
+        def dump_options(options)
+          options.empty? ? nil : JSON.generate(options)
+        end
+
+        def load_options(json)
+          json ? JSON.parse(json, symbolize_names: true) : {}
+        end
+
+        def normalize_options(options)
+          return if options.nil?
+          return options if options.is_a?(Job::Options)
+
+          Job::Options.new(**options)
         end
 
         def prepare_statements
@@ -168,23 +207,27 @@ module Async
             RETURNING id, class_name, args, options
           SQL
 
-          @complete_stmt = @db.prepare("UPDATE jobs SET status = 'done' WHERE id = ?")
-          @fail_stmt     = @db.prepare("UPDATE jobs SET status = 'failed' WHERE id = ?")
-
+          @complete_stmt    = @db.prepare("UPDATE jobs SET status = 'done',   locked_by = NULL, locked_at = NULL WHERE id = ?")
+          @fail_stmt        = @db.prepare("UPDATE jobs SET status = 'failed', locked_by = NULL, locked_at = NULL WHERE id = ?")
+          @retry_state_stmt = @db.prepare("SELECT options FROM jobs WHERE id = ?")
+          @retry_stmt       = @db.prepare(
+            "UPDATE jobs SET status = 'pending', locked_by = NULL, locked_at = NULL, run_at = ?, options = ? WHERE id = ?"
+          )
           @requeue_stmt = @db.prepare(
             "UPDATE jobs SET status = 'pending', locked_by = NULL, locked_at = NULL " \
             "WHERE status = 'running' AND locked_by = ?"
           )
-
           @cleanup_stmt = @db.prepare("DELETE FROM jobs WHERE status = 'done' AND created_at < ?")
         end
 
         def finalize_statements
-          [@enqueue_stmt, @fetch_stmt, @complete_stmt, @fail_stmt, @requeue_stmt, @cleanup_stmt].each do |s|
-            s&.close rescue next
+          [@enqueue_stmt, @fetch_stmt, @complete_stmt, @fail_stmt,
+           @retry_state_stmt, @retry_stmt, @requeue_stmt, @cleanup_stmt].each do |stmt|
+            stmt&.close rescue next
           end
 
-          @enqueue_stmt = @fetch_stmt = @complete_stmt = @fail_stmt = @requeue_stmt = @cleanup_stmt = nil
+          @enqueue_stmt = @fetch_stmt = @complete_stmt = @fail_stmt = nil
+          @retry_state_stmt = @retry_stmt = @requeue_stmt = @cleanup_stmt = nil
         end
 
         def maybe_cleanup
@@ -193,10 +236,7 @@ module Async
 
           @last_cleanup_at = now
           @cleanup_stmt.execute(realtime_now - CLEANUP_AGE)
-
-          if @db.changes > 100
-            @db.execute("PRAGMA incremental_vacuum")
-          end
+          @db.execute("PRAGMA incremental_vacuum") if @db.changes > 100
         end
       end
     end

@@ -69,13 +69,12 @@ module Async
         @listen_queue = false
         return unless queue_socket_dir
 
-        # Lazy require — only loaded when queue is actually used
+        isolated = ENV.fetch("ISOLATION_FORKS", "").split(",").map(&:to_i)
+        return if isolated.include?(worker_index)
+
         require_relative 'queue/store'
         require_relative 'queue/socket_waker'
         require_relative 'queue/client'
-
-        isolated = ENV.fetch("ISOLATION_FORKS", "").split(",").map(&:to_i)
-        return if isolated.include?(worker_index)
 
         @listen_queue = true
         @queue_store  = Queue::Store.new(
@@ -112,40 +111,49 @@ module Async
 
       def run_queue_job(job_task, job)
         class_name = job[:class_name]
-        args       = job[:args]
         klass      = resolve_job_class(class_name)
-        opts       = Job::Options.new(**job[:options])
-        timeout    = opts.timeout
+        options    = Job::Options.new(**(job[:options] || {}))
 
         metrics.job_started(nil)
-        t = monotonic_now
+        started = monotonic_now
+        job_task.with_timeout(options.timeout) { klass.perform_now(*job[:args]) }
+        duration = monotonic_now - started
 
-        job_task.with_timeout(timeout) { klass.perform_now(*args) }
-
-        duration = monotonic_now - t
         metrics.job_finished(nil, duration)
         @queue_store.complete(job[:id])
-
-        logger.info('Async::Background') {
-          "queue(#{class_name}): completed in #{duration.round(2)}s"
-        }
+        logger.info('Async::Background') { "queue(#{class_name}): completed in #{duration.round(2)}s" }
       rescue ::Async::TimeoutError
         metrics.job_timed_out(nil)
-        @queue_store.fail(job[:id])
-        logger.error('Async::Background') { "queue(#{class_name}): timed out after #{timeout}s" }
-      rescue => e
+        handle_queue_failure(job, options, "timed out after #{options.timeout}s", backtrace: nil)
+      rescue ConfigError => e
         metrics.job_failed(nil, e)
         @queue_store.fail(job[:id])
-        logger.error('Async::Background') {
-          "queue(#{class_name}): #{e.class} #{e.message}\n#{e.backtrace.join("\n")}"
-        }
+        logger.error('Async::Background') { "queue(#{class_name}): #{e.class} #{e.message}" }
+      rescue => e
+        metrics.job_failed(nil, e)
+        handle_queue_failure(job, options, "#{e.class} #{e.message}", backtrace: e.backtrace)
+      end
+
+      def handle_queue_failure(job, options, message, backtrace:)
+        result = @queue_store.retry_or_fail(job[:id], options: options)
+        class_name = job[:class_name]
+
+        if result == :retried
+          @queue_waker&.signal
+          attempt = options.next_attempt
+          logger.warn('Async::Background') do
+            "queue(#{class_name}): #{message}; retry #{attempt}/#{options.retry}"
+          end
+        else
+          tail = backtrace ? "\n#{backtrace.join("\n")}" : ''
+          logger.error('Async::Background') { "queue(#{class_name}): #{message}#{tail}" }
+        end
       end
 
       def resolve_job_class(class_name)
-        raise ConfigError, "empty class name in queue job" if class_name.nil? || class_name.strip.empty?
+        raise ConfigError, "empty class name in queue job" if class_name.nil? || class_name.to_s.strip.empty?
 
-        names = class_name.split("::")
-        klass = names.reduce(Object) do |mod, name|
+        klass = class_name.split("::").reduce(Object) do |mod, name|
           raise ConfigError, "unknown class: #{class_name}" unless mod.const_defined?(name, false)
           mod.const_get(name, false)
         end

@@ -170,4 +170,79 @@ RSpec.describe Async::Background::Job, type: :unit do
       expect(captured_args[3]).to be_a(Array)
     end
   end
+
+  describe 'job options' do
+    let(:configurable_job_class) do
+      Class.new do
+        include Async::Background::Job
+
+        options timeout: 45, retry: 3, retry_delay: 10, backoff: :linear
+
+        def self.name
+          'ConfigurableJob'
+        end
+
+        def self.perform_now(*); end
+      end
+    end
+
+    it 'stores class-level retry-related options' do
+      expect(configurable_job_class.resolve_options).to eq(
+        timeout: 45,
+        retry: 3,
+        retry_delay: 10.0,
+        backoff: :linear
+      )
+    end
+
+    it 'passes merged retry-related options to the queue client' do
+      expect(mock_client).to receive(:push).with(
+        'ConfigurableJob',
+        ['arg1'],
+        nil,
+        options: {
+          timeout: 45,
+          retry: 5,
+          retry_delay: 2.5,
+          backoff: :exponential
+        }
+      )
+
+      configurable_job_class.perform_async(
+        'arg1',
+        options: { retry: 5, retry_delay: 2.5, backoff: :exponential }
+      )
+    end
+
+    it 'requires retry_delay when retry is enabled' do
+      expect {
+        Class.new do
+          include Async::Background::Job
+          options retry: 2
+        end
+      }.to raise_error(ArgumentError, /retry_delay is required/)
+    end
+
+    it 'requires retry_delay to be strictly positive when retry is enabled' do
+      expect {
+        Class.new do
+          include Async::Background::Job
+          options retry: 2, retry_delay: 0
+        end
+      }.to raise_error(ArgumentError, /retry_delay must be > 0/)
+    end
+
+    it 'tracks retry attempts inside options' do
+      options = Async::Background::Job::Options.new(retry: 2, retry_delay: 4, backoff: :linear)
+
+      expect(options.next_attempt).to eq(1)
+      expect(options.with_attempt(1).to_h.compact).to eq(
+        timeout: 120,
+        retry: 2,
+        retry_delay: 4.0,
+        backoff: :linear,
+        attempt: 1
+      )
+    end
+  end
 end
