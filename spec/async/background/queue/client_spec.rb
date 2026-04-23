@@ -7,6 +7,14 @@ RSpec.describe Async::Background::Queue::Client, type: :unit do
   let(:mock_notifier) { instance_double('Async::Background::Queue::Notifier') }
   let(:client) { described_class.new(store: mock_store, notifier: mock_notifier) }
 
+  before do
+    @previous_client = Async::Background::Queue.default_client
+  end
+
+  after do
+    Async::Background::Queue.default_client = @previous_client
+  end
+
   describe '#initialize' do
     it 'creates client with store and notifier' do
       expect(client).to be_a(described_class)
@@ -15,6 +23,45 @@ RSpec.describe Async::Background::Queue::Client, type: :unit do
     it 'can be created without notifier' do
       client_without_notifier = described_class.new(store: mock_store)
       expect(client_without_notifier).to be_a(described_class)
+    end
+  end
+
+  describe '.enqueue option merging' do
+    let(:job_class) do
+      Class.new do
+        include Async::Background::Job
+
+        options timeout: 45, retry: 3, retry_delay: 10, backoff: :linear
+
+        def self.name
+          'ClientSpecConfiguredJob'
+        end
+
+        def perform(*); end
+      end
+    end
+
+    it 'keeps class-level options when call-site values are nil' do
+      Async::Background::Queue.default_client = client
+
+      expect(mock_store).to receive(:enqueue).with(
+        'ClientSpecConfiguredJob',
+        ['arg1'],
+        nil,
+        options: {
+          timeout: 45,
+          retry: 3,
+          retry_delay: 10.0,
+          backoff: :linear
+        }
+      ).and_return(42)
+      expect(mock_notifier).to receive(:notify_all)
+
+      Async::Background::Queue.enqueue(
+        job_class,
+        'arg1',
+        options: { retry: nil, retry_delay: nil, backoff: nil }
+      )
     end
   end
 
@@ -276,6 +323,57 @@ RSpec.describe Async::Background::Queue::Client, type: :unit do
       expect {
         Async::Background::Queue.enqueue(bad)
       }.to raise_error(ArgumentError, /must include Async::Background::Job/)
+    end
+  end
+
+  describe 'option normalization' do
+    let(:retrying_job_class) do
+      Class.new do
+        include Async::Background::Job
+        options timeout: 15, retry: 3, retry_delay: 4, backoff: :linear
+
+        def self.name
+          'RetryingQueueJob'
+        end
+
+        def self.perform_now(*); end
+      end
+    end
+
+    before do
+      @previous_client = Async::Background::Queue.default_client
+      Async::Background::Queue.default_client = client
+    end
+
+    after do
+      Async::Background::Queue.default_client = @previous_client
+    end
+
+    it 'merges class-level and call-site retry options' do
+      expect(mock_store).to receive(:enqueue).with(
+        'RetryingQueueJob',
+        ['arg'],
+        nil,
+        options: {
+          timeout: 15,
+          retry: 5,
+          retry_delay: 1.5,
+          backoff: :exponential
+        }
+      ).and_return(77)
+      expect(mock_notifier).to receive(:notify_all)
+
+      Async::Background::Queue.enqueue(
+        retrying_job_class,
+        'arg',
+        options: { retry: 5, retry_delay: 1.5, backoff: :exponential }
+      )
+    end
+
+    it 'validates retry options before enqueueing' do
+      expect {
+        Async::Background::Queue.enqueue(retrying_job_class, options: { retry: 2, retry_delay: nil })
+      }.to raise_error(ArgumentError, /retry_delay is required/)
     end
   end
 end

@@ -206,6 +206,52 @@ class HeavySyncJob
 end
 ```
 
+### Retries (queue jobs only)
+
+Queue jobs can opt into automatic retries on failure or timeout:
+
+```ruby
+class SendWebhookJob
+  include Async::Background::Job
+
+  options timeout: 30, retry: 5, retry_delay: 10, backoff: :exponential
+
+  def perform(endpoint_id)
+    Endpoint.find(endpoint_id).deliver!
+  end
+end
+```
+
+| option        | meaning                                                              | default  |
+| ------------- | -------------------------------------------------------------------- | -------- |
+| `retry`       | max retry attempts after the initial run (`0` disables)              | `0`      |
+| `retry_delay` | base delay in seconds; required when `retry > 0`                     | —        |
+| `backoff`     | `:fixed`, `:linear`, or `:exponential`                               | `:fixed` |
+| `jitter`      | random factor in `[0, 1]`; delay × `(1 + rand * jitter)`             | see note |
+
+**Jitter** is applied on top of the backoff formula to spread retries and avoid
+thundering-herd when many jobs fail at once. It defaults to `0.5` for
+`:exponential` and `0` for `:fixed`/`:linear`. Pass `jitter: 0` to disable or
+`jitter: 0.3` to override.
+
+Delay formulas (for `retry_delay: 10` and attempt `n`, before jitter):
+
+- `:fixed`       → `10`
+- `:linear`      → `10 * n`
+- `:exponential` → `10 * 2^(n-1)`
+
+Call-site overrides work the same as for `timeout`:
+
+```ruby
+SendWebhookJob.perform_async(id, options: { retry: 10, backoff: :linear })
+# passing nil keeps the class-level value:
+SendWebhookJob.perform_async(id, options: { retry: nil })  # still retries 5 times
+```
+
+> Retries apply to **queue jobs only** (`perform_async` / `perform_in` /
+> `perform_at`). Cron and interval jobs from the YAML schedule are not retried
+> by the queue store — they will simply run again at their next scheduled tick.
+
 Now you have three ways to enqueue:
 
 ```ruby
