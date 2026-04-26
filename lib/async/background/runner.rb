@@ -11,6 +11,7 @@ module Async
     MIN_SLEEP_TIME      = 0.1
     MAX_JITTER          = 5
     QUEUE_POLL_INTERVAL = 5
+    DEFAULT_FETCH_BATCH = 1
 
     class Runner
       include Clock
@@ -19,7 +20,8 @@ module Async
 
       def initialize(
         config_path:, job_count: 2, worker_index:, total_workers:,
-        queue_socket_dir: nil, queue_db_path: nil, queue_mmap: true
+        queue_socket_dir: nil, queue_db_path: nil, queue_mmap: true,
+        fetch_batch_size: nil
       )
         @logger        = Console.logger
         @worker_index  = worker_index
@@ -27,10 +29,12 @@ module Async
         @running       = true
         @shutdown      = ::Async::Condition.new
         @metrics       = Metrics.new(worker_index: worker_index, total_workers: total_workers)
+        @job_count     = Integer(job_count)
+        @fetch_batch_size = [Integer(fetch_batch_size || ENV.fetch("QUEUE_FETCH_BATCH_SIZE", DEFAULT_FETCH_BATCH)), 1].max
 
         logger.info { "Async::Background worker_index=#{worker_index}/#{total_workers}, job_count=#{job_count}" }
 
-        @semaphore = ::Async::Semaphore.new(job_count)
+        @semaphore = ::Async::Semaphore.new(@job_count)
         @heap      = build_heap(config_path)
 
         setup_queue(queue_socket_dir, queue_db_path, queue_mmap)
@@ -94,19 +98,32 @@ module Async
         @queue_waker.start_accept_loop(task)
 
         task.async do
-          logger.info { "Async::Background queue: listening on worker #{worker_index}" }
+          logger.info { "Async::Background queue: listening on worker #{worker_index} (fetch_batch=#{effective_fetch_batch_size})" }
 
           while running?
             @queue_waker.wait(timeout: QUEUE_POLL_INTERVAL)
 
             while running?
-              job = @queue_store.fetch(worker_index)
-              break unless job
+              jobs = fetch_queue_jobs
+              break if jobs.empty?
 
-              semaphore.async { |job_task| run_queue_job(job_task, job) }
+              jobs.each do |job|
+                semaphore.async { |job_task| run_queue_job(job_task, job) }
+              end
             end
           end
         end
+      end
+
+      def fetch_queue_jobs
+        limit = effective_fetch_batch_size
+        return [@queue_store.fetch(worker_index)].compact if limit == 1
+
+        @queue_store.fetch_batch(worker_index, limit: limit)
+      end
+
+      def effective_fetch_batch_size
+        [@fetch_batch_size, @job_count].min
       end
 
       def run_queue_job(job_task, job)

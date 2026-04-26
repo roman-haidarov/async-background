@@ -15,38 +15,74 @@ module Async
           @notifier = notifier
         end
 
-        def push(class_name, args = [], run_at = nil, options: {})
-          id = @store.enqueue(class_name, args, run_at, options: options)
+        def push(class_name, args = [], run_at = nil, options: {}, idempotency_key: nil)
+          id = @store.enqueue(class_name, args, run_at,
+                              options: options,
+                              idempotency_key: idempotency_key)
           @notifier&.notify_all
           id
         end
 
-        def push_in(delay, class_name, args = [], options: {})
-          push(class_name, args, realtime_now + delay.to_f, options: options)
+        def push_in(delay, class_name, args = [], options: {}, idempotency_key: nil)
+          push(class_name, args, realtime_now + delay.to_f,
+               options: options, idempotency_key: idempotency_key)
         end
 
-        def push_at(time, class_name, args = [], options: {})
+        def push_at(time, class_name, args = [], options: {}, idempotency_key: nil)
           run_at = time.respond_to?(:to_f) ? time.to_f : time
-          push(class_name, args, run_at, options: options)
+          push(class_name, args, run_at,
+               options: options, idempotency_key: idempotency_key)
+        end
+
+        def push_many(jobs)
+          results = @store.enqueue_many(jobs)
+          @notifier&.notify_all if results.any? { |r| r[:inserted] }
+          results
         end
       end
 
       class << self
         attr_accessor :default_client
 
-        def enqueue(job_class, *args, options: {})
+        def enqueue(job_class, *args, options: {}, idempotency_key: nil)
           ensure_configured!
-          default_client.push(resolve_class_name(job_class), args, nil, options: build_options(job_class, options))
+          default_client.push(
+            resolve_class_name(job_class), args, nil,
+            options: build_options(job_class, options),
+            idempotency_key: idempotency_key
+          )
         end
 
-        def enqueue_in(delay, job_class, *args, options: {})
+        def enqueue_in(delay, job_class, *args, options: {}, idempotency_key: nil)
           ensure_configured!
-          default_client.push_in(delay, resolve_class_name(job_class), args, options: build_options(job_class, options))
+          default_client.push_in(
+            delay, resolve_class_name(job_class), args,
+            options: build_options(job_class, options),
+            idempotency_key: idempotency_key
+          )
         end
 
-        def enqueue_at(time, job_class, *args, options: {})
+        def enqueue_at(time, job_class, *args, options: {}, idempotency_key: nil)
           ensure_configured!
-          default_client.push_at(time, resolve_class_name(job_class), args, options: build_options(job_class, options))
+          default_client.push_at(
+            time, resolve_class_name(job_class), args,
+            options: build_options(job_class, options),
+            idempotency_key: idempotency_key
+          )
+        end
+
+        def enqueue_many(entries)
+          ensure_configured!
+          payload = entries.map do |entry|
+            {
+              class_name:      resolve_class_name(entry.fetch(:job_class)),
+              args:            entry[:args] || [],
+              options:         build_options(entry[:job_class], entry[:options] || {}),
+              run_at:          coerce_run_at(entry[:run_at]),
+              idempotency_key: entry[:idempotency_key]
+            }
+          end
+          default_client.push_many(payload)
         end
 
         private
@@ -83,6 +119,11 @@ module Async
           return {} unless job_class.respond_to?(:resolve_options)
 
           job_class.resolve_options.dup
+        end
+
+        def coerce_run_at(value)
+          return nil if value.nil?
+          value.respond_to?(:to_f) ? value.to_f : value
         end
       end
     end

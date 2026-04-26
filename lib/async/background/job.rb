@@ -55,9 +55,17 @@ module Async
       module ClassMethods
         def perform_now(*args) = new.perform(*args)
 
-        def perform_async(*args, options: {})     = Async::Background::Queue.enqueue(self, *args, options: options)
-        def perform_in(delay, *args, options: {}) = Async::Background::Queue.enqueue_in(delay, self, *args, options: options)
-        def perform_at(time, *args, options: {})  = Async::Background::Queue.enqueue_at(time, self, *args, options: options)
+        def perform_async(*args, options: {}, idempotency_key: nil)
+          Async::Background::Queue.enqueue(self, *args, options: options, idempotency_key: idempotency_key)
+        end
+
+        def perform_in(delay, *args, options: {}, idempotency_key: nil)
+          Async::Background::Queue.enqueue_in(delay, self, *args, options: options, idempotency_key: idempotency_key)
+        end
+
+        def perform_at(time, *args, options: {}, idempotency_key: nil)
+          Async::Background::Queue.enqueue_at(time, self, *args, options: options, idempotency_key: idempotency_key)
+        end
 
         def options(**values)
           @options = Options.new(**values).to_h.compact
