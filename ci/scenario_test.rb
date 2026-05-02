@@ -418,10 +418,11 @@ module ScenarioTest
 
     def run_all!
       results = {}
-      results[:normal]       = run_normal_scenario
-      results[:recovery]     = run_recovery_scenario
-      results[:enqueue_perf] = run_enqueue_perf_scenario
-      results[:overlap]      = run_overlap_scenario
+      results[:normal]         = run_normal_scenario
+      results[:recovery]       = run_recovery_scenario
+      results[:enqueue_perf]   = run_enqueue_perf_scenario
+      results[:overlap]        = run_overlap_scenario
+      results[:enqueue_stress] = run_enqueue_stress_scenario
 
       if results.values.all?
         Log.header('✅ ALL SCENARIOS PASSED')
@@ -559,6 +560,126 @@ module ScenarioTest
       Log.error("enqueue_perf scenario crashed: #{e.class}: #{e.message}")
       e.backtrace.first(10).each { |line| Log.error("  #{line}") }
       false
+    end
+
+    def run_enqueue_stress_scenario
+      Log.header("SCENARIO 5: ENQUEUE STRESS (2 forks → 1 SQLite file, 30s)")
+
+      setup_clean_state!
+
+      # Pre-create the schema so producers don't race on first connect.
+      Async::Background::Queue::Store.new(path: Config::QUEUE_DB_PATH).tap(&:ensure_database!).close
+
+      # Synchronized start: all forks block on this barrier file's existence.
+      barrier_path = File.expand_path('../tmp/ci_stress_barrier', __dir__)
+      FileUtils.rm_f(barrier_path)
+
+      pipes = Array.new(2) { IO.pipe }
+      pids  = []
+
+      2.times do |i|
+        reader, writer = pipes[i]
+        pid = fork do
+          reader.close
+          run_stress_producer(producer_index: i, barrier_path: barrier_path, result_io: writer, duration: 30.0)
+        end
+        writer.close
+        pids << pid
+      end
+
+      # Give children a moment to open their DB connections, then drop the barrier.
+      sleep(0.3)
+      FileUtils.touch(barrier_path)
+      Log.info("barrier released — 2 producers writing for 30s …")
+
+      results = pipes.map.with_index do |(reader, _), i|
+        raw = reader.read
+        reader.close
+        Process.waitpid(pids[i])
+        JSON.parse(raw, symbolize_names: true)
+      rescue => e
+        Log.error("producer #{i} result read failed: #{e.class}: #{e.message}")
+        nil
+      end
+
+      FileUtils.rm_f(barrier_path)
+
+      errors = []
+      if results.any?(&:nil?)
+        errors << "one or more producers crashed"
+      else
+        total      = results.sum { |r| r[:enqueued] }
+        busy_total = results.sum { |r| r[:busy] }
+        wall       = results.map { |r| r[:duration] }.max
+        per_sec    = total / wall
+
+        Log.ok("total enqueued:       #{total}")
+        Log.ok("aggregate throughput: #{per_sec.round(0)} jobs/s")
+        Log.ok("wall time:            #{wall.round(2)}s")
+        results.each_with_index do |r, i|
+          Log.info("  producer #{i}: #{r[:enqueued]} jobs " \
+                   "(#{(r[:enqueued] / r[:duration]).round(0)}/s, busy_retries=#{r[:busy]})")
+        end
+        Log.info("busy retries (total): #{busy_total}") if busy_total > 0
+
+        # Cross-check that what's on disk matches what producers reported.
+        inspector = QueueInspector.new(Config::QUEUE_DB_PATH)
+        actual = inspector.counts_by_status['pending'].to_i
+        inspector.close
+        if actual != total
+          errors << "disk row count #{actual} != reported enqueued #{total}"
+        else
+          Log.ok("disk row count matches reported total (#{actual})")
+        end
+      end
+
+      report_scenario_result('enqueue_stress', errors)
+    rescue => e
+      Log.error("enqueue_stress scenario crashed: #{e.class}: #{e.message}")
+      e.backtrace.first(10).each { |line| Log.error("  #{line}") }
+      false
+    end
+
+    # Runs in a forked child. No logging during the hot loop.
+    def run_stress_producer(producer_index:, barrier_path:, result_io:, duration:)
+      store = Async::Background::Queue::Store.new(path: Config::QUEUE_DB_PATH)
+      client = Async::Background::Queue::Client.new(store: store, notifier: nil)
+
+      # Wait on barrier so all producers start within the same millisecond.
+      sleep(0.005) until File.exist?(barrier_path)
+
+      enqueued     = 0
+      busy_retries = 0
+      class_name   = 'CIJobs::FastJob'
+      args         = [producer_index]
+
+      t0       = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      deadline = t0 + duration
+
+      while Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
+        begin
+          client.push(class_name, args)
+          enqueued += 1
+        rescue SQLite3::BusyException
+          busy_retries += 1
+        end
+      end
+
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0
+      store.close
+
+      result_io.write(JSON.generate(
+        producer:  producer_index,
+        enqueued:  enqueued,
+        busy:      busy_retries,
+        duration:  elapsed
+      ))
+      result_io.close
+      exit!(0)
+    rescue => e
+      result_io.write(JSON.generate(producer: producer_index, error: "#{e.class}: #{e.message}")) rescue nil
+      result_io.close rescue nil
+      exit!(1)
     end
 
     def run_overlap_scenario
