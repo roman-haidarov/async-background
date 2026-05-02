@@ -567,10 +567,8 @@ module ScenarioTest
 
       setup_clean_state!
 
-      # Pre-create the schema so producers don't race on first connect.
       Async::Background::Queue::Store.new(path: Config::QUEUE_DB_PATH).tap(&:ensure_database!).close
 
-      # Synchronized start: all forks block on this barrier file's existence.
       barrier_path = File.expand_path('../tmp/ci_stress_barrier', __dir__)
       FileUtils.rm_f(barrier_path)
 
@@ -587,7 +585,6 @@ module ScenarioTest
         pids << pid
       end
 
-      # Give children a moment to open their DB connections, then drop the barrier.
       sleep(0.3)
       FileUtils.touch(barrier_path)
       Log.info("barrier released — 2 producers writing for 30s …")
@@ -622,7 +619,6 @@ module ScenarioTest
         end
         Log.info("busy retries (total): #{busy_total}") if busy_total > 0
 
-        # Cross-check that what's on disk matches what producers reported.
         inspector = QueueInspector.new(Config::QUEUE_DB_PATH)
         actual = inspector.counts_by_status['pending'].to_i
         inspector.close
@@ -640,12 +636,10 @@ module ScenarioTest
       false
     end
 
-    # Runs in a forked child. No logging during the hot loop.
     def run_stress_producer(producer_index:, barrier_path:, result_io:, duration:)
       store = Async::Background::Queue::Store.new(path: Config::QUEUE_DB_PATH)
       client = Async::Background::Queue::Client.new(store: store, notifier: nil)
 
-      # Wait on barrier so all producers start within the same millisecond.
       sleep(0.005) until File.exist?(barrier_path)
 
       enqueued     = 0

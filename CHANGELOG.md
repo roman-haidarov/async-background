@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.7.1
+
+### Features
+- **Tunable `Store` options via `StoreOptions`** — three knobs exposed for SQLite tuning, validated at construction time so misconfigurations fail fast at boot:
+  - `mmap` (`true`/`false`, default `true`) — toggle memory-mapped I/O
+  - `synchronous` (`:normal`/`:full`/`:extra`, default `:normal`) — durability vs throughput
+  - `wal_autocheckpoint` (`Integer` in `100..10_000`, default `1_000`) — WAL checkpoint frequency in pages
+
+  Range and enum validation prevent foot-guns (e.g. `wal_autocheckpoint: 100_000` would bloat WAL beyond `journal_size_limit`). See [Get Started → Store tuning](docs/GET_STARTED.md) for trade-offs of each knob
+
+### Breaking changes
+- `Store.new(path:, mmap:)` → `Store.new(path:, options: { mmap: ... })`. Direct `mmap:` keyword argument removed in favor of the unified `options:` hash. Users who construct `Store` manually (e.g. for web-worker enqueue) need to update the call site
+
 ## 0.6.2
 
 ### Features

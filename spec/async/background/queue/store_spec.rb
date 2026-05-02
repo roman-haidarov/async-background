@@ -26,7 +26,7 @@ RSpec.describe Async::Background::Queue::Store, type: :unit do
 
     it 'accepts mmap option' do
       mmap_path = temp_db_path
-      store_with_mmap = described_class.new(path: mmap_path, mmap: true)
+      store_with_mmap = described_class.new(path: mmap_path, options: { mmap: true })
       store_with_mmap.ensure_database!
       expect(store_with_mmap).to be_a(described_class)
       store_with_mmap.close
@@ -34,10 +34,32 @@ RSpec.describe Async::Background::Queue::Store, type: :unit do
 
     it 'accepts mmap: false' do
       no_mmap_path = temp_db_path
-      store_no_mmap = described_class.new(path: no_mmap_path, mmap: false)
+      store_no_mmap = described_class.new(path: no_mmap_path, options: { mmap: false })
       store_no_mmap.ensure_database!
       store_no_mmap.enqueue('NoMmapJob', [])
       store_no_mmap.close
+    end
+
+    it 'rejects unknown synchronous level' do
+      expect {
+        described_class.new(path: temp_db_path, options: { synchronous: :bogus })
+      }.to raise_error(ArgumentError, /synchronous must be one of/)
+    end
+
+    it 'rejects wal_autocheckpoint outside the allowed range' do
+      expect {
+        described_class.new(path: temp_db_path, options: { wal_autocheckpoint: 50 })
+      }.to raise_error(ArgumentError, /wal_autocheckpoint must be an Integer/)
+
+      expect {
+        described_class.new(path: temp_db_path, options: { wal_autocheckpoint: 50_000 })
+      }.to raise_error(ArgumentError, /wal_autocheckpoint must be an Integer/)
+    end
+
+    it 'rejects non-boolean mmap' do
+      expect {
+        described_class.new(path: temp_db_path, options: { mmap: 'yes' })
+      }.to raise_error(ArgumentError, /mmap must be true or false/)
     end
   end
 
