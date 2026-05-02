@@ -78,8 +78,8 @@ module Async
 
         @listen_queue = true
         @queue_store  = Queue::Store.new(
-          path: queue_db_path || Queue::Store.default_path,
-          mmap: queue_mmap
+          path:    queue_db_path || Queue::Store.default_path,
+          options: { mmap: queue_mmap }
         )
 
         socket_path = File.join(queue_socket_dir, "async_bg_worker_#{worker_index}.sock")

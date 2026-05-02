@@ -6,6 +6,49 @@ require_relative '../clock'
 module Async
   module Background
     module Queue
+      SYNCHRONOUS_LEVELS = { normal: 'NORMAL', full: 'FULL', extra: 'EXTRA' }.freeze
+      WAL_AUTOCHECKPOINT_RANGE = 100..10_000
+      DEFAULTS = { mmap: true, synchronous: :normal, wal_autocheckpoint: 1_000 }.freeze
+      MMAP_SIZE = 268_435_456
+
+      StoreOptions = Data.define(:mmap, :synchronous, :wal_autocheckpoint) do
+        def self.build(value = {}) = value.is_a?(self) ? value : new(**DEFAULTS, **value)
+
+        def initialize(mmap:, synchronous:, wal_autocheckpoint:)
+          unless mmap == true || mmap == false
+            raise ArgumentError, "mmap must be true or false, got #{mmap.inspect}"
+          end
+
+          unless SYNCHRONOUS_LEVELS.key?(synchronous)
+            raise ArgumentError,
+              "synchronous must be one of #{SYNCHRONOUS_LEVELS.keys.inspect}, got #{synchronous.inspect}"
+          end
+
+          unless wal_autocheckpoint.is_a?(Integer) && WAL_AUTOCHECKPOINT_RANGE.cover?(wal_autocheckpoint)
+            raise ArgumentError,
+              "wal_autocheckpoint must be an Integer in #{WAL_AUTOCHECKPOINT_RANGE}, " \
+              "got #{wal_autocheckpoint.inspect}"
+          end
+
+          super
+        end
+
+        def synchronous_pragma = SYNCHRONOUS_LEVELS.fetch(synchronous)
+        def mmap_size = mmap ? MMAP_SIZE : 0
+
+        def pragma_sql
+          <<~SQL
+            PRAGMA journal_mode       = WAL;
+            PRAGMA synchronous        = #{synchronous_pragma};
+            PRAGMA mmap_size          = #{mmap_size};
+            PRAGMA cache_size         = -16000;
+            PRAGMA temp_store         = MEMORY;
+            PRAGMA journal_size_limit = 67108864;
+            PRAGMA wal_autocheckpoint = #{wal_autocheckpoint};
+          SQL
+        end
+      end
+
       class Store
         include Clock
 
@@ -25,29 +68,17 @@ module Async
           CREATE INDEX IF NOT EXISTS idx_jobs_pending ON jobs(run_at, id) WHERE status = 'pending';
         SQL
 
-        MMAP_SIZE = 268_435_456
-        PRAGMAS = ->(mmap_size) {
-          <<~SQL
-            PRAGMA journal_mode       = WAL;
-            PRAGMA synchronous        = NORMAL;
-            PRAGMA mmap_size          = #{mmap_size};
-            PRAGMA cache_size         = -16000;
-            PRAGMA temp_store         = MEMORY;
-            PRAGMA busy_timeout       = 5000;
-            PRAGMA journal_size_limit = 67108864;
-          SQL
-        }.freeze
-
         CLEANUP_INTERVAL = 300
         CLEANUP_AGE      = 3600
 
-        attr_reader :path
+        attr_reader :path, :options
 
-        def initialize(path: self.class.default_path, mmap: true)
-          @path            = path
-          @pragma_sql      = PRAGMAS.call(mmap ? MMAP_SIZE : 0).freeze
-          @db              = nil
-          @schema_checked  = false
+        def initialize(path: self.class.default_path, options: {})
+          @path           = path
+          @options        = StoreOptions.build(options)
+          @pragma_sql     = @options.pragma_sql.freeze
+          @db             = nil
+          @schema_checked = false
           @last_cleanup_at = nil
         end
 
