@@ -23,9 +23,10 @@ RSpec.describe Async::Background::Metrics, type: :unit do
 
       expect {
         metrics.job_started(nil)
-        metrics.job_finished(nil, 0.25)
+        metrics.job_succeeded(nil, 0.25)
         metrics.job_failed(nil, StandardError.new('boom'))
         metrics.job_timed_out(nil)
+        metrics.job_stopped(nil)
         metrics.job_skipped(nil)
       }.not_to raise_error
     end
@@ -34,7 +35,7 @@ RSpec.describe Async::Background::Metrics, type: :unit do
       expect(described_class.available?).to be(false)
     end
 
-    it 'lets dashboard callers treat missing metrics as an empty snapshot' do
+    it 'lets optional observers treat missing metrics as an empty snapshot' do
       expect(described_class.read_all(total_workers: 1, path: shm_path)).to eq([])
     end
   end
@@ -127,7 +128,8 @@ RSpec.describe Async::Background::Metrics, type: :unit do
       metrics = described_class.new(worker_index: 1, total_workers: 1, shm_path: shm_path)
 
       metrics.job_started(nil)
-      metrics.job_finished(nil, 1.234)
+      metrics.job_succeeded(nil, 1.234)
+      metrics.job_stopped(nil)
       metrics.job_skipped(nil)
 
       expect(metrics).to be_enabled
@@ -145,6 +147,15 @@ RSpec.describe Async::Background::Metrics, type: :unit do
       )
       expect(values.fetch(:last_run_at)).to be_a(Integer)
     end
+
+    it 'keeps active_jobs balanced when a started job loses its terminal lease' do
+      metrics = described_class.new(worker_index: 1, total_workers: 1, shm_path: shm_path)
+
+      metrics.job_started(nil)
+      metrics.job_stopped(nil)
+
+      expect(metrics.values).to include(total_runs: 1, active_jobs: 0, total_successes: 0)
+    end
   end
 
   describe '.read_all' do
@@ -154,7 +165,7 @@ RSpec.describe Async::Background::Metrics, type: :unit do
       }.to raise_error(ArgumentError, 'total_workers must be a positive Integer')
     end
 
-    it 'maps a dashboard snapshot read-only' do
+    it 'maps an observer snapshot read-only' do
       field_class = Struct.new(:name, :type, :offset, keyword_init: true)
       schema_class = Class.new do
         define_singleton_method(:build) do |fields|

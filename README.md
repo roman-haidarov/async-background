@@ -92,9 +92,8 @@ Without this, you will get database crashes in multi-process mode. See [Get Star
 **Don't share SQLite connections across `fork()`.** The gem opens connections lazily after fork, but if you create a `Queue::Store` manually for schema setup, close it before forking:
 
 ```ruby
-store = Async::Background::Queue::Store.new(path: db_path)
-store.ensure_database!
-store.close  # ← before fork
+Async::Background::Queue.migrate!(path: db_path) # ← once, before fork
+# Every process opens its own Store lazily after fork.
 ```
 
 **Two clocks, on purpose.** Interval jobs use `CLOCK_MONOTONIC` (immune to NTP drift). Cron jobs use wall-clock time, because "every day at 3am" needs to mean 3am.
@@ -127,6 +126,33 @@ The dynamic queue runs alongside it:
 
 Jobs are persisted in SQLite, so a missed wake-up is never a lost job — workers also poll every 5 seconds as a safety net.
 
+### Schema migration during deploy
+
+Run queue migrations once in the release/pre-deploy step, before starting new web or worker
+processes. This serializes the schema upgrade with `BEGIN IMMEDIATE`, records the version in
+SQLite, and avoids a first producer doing DDL under live queue traffic:
+
+```ruby
+Async::Background::Queue.migrate!(path: ENV.fetch("QUEUE_DB_PATH"))
+```
+
+A fresh database still self-initializes on first use for local development, but explicit
+migration is the production path. For an existing queue, finish or stop 0.7.1 producers/workers,
+run the migration once, then start 0.7.2 processes.
+
+### Future dashboard indexes
+
+The queue does **not** install dashboard indexes by default. They slow every enqueue even though
+pending rows never enter terminal or in-flight read-model indexes. When the 1.0 dashboard module
+is enabled, its installer will run this once in the same release step:
+
+```ruby
+Async::Background::Queue.prepare_dashboard!(path: ENV.fetch("QUEUE_DB_PATH"))
+```
+
+It adds three compact indexes: one each for cursor-sorted done and failed jobs, plus one for
+the bounded in-flight list. It does not change queue behavior or rerun the core migration.
+
 ## Metrics
 
 Metrics are an optional integration with `async-utilization` (`>= 0.3`, `< 0.5`). The
@@ -144,13 +170,17 @@ Async::Background::Metrics.read_all(total_workers: 2)
 ```
 
 `Metrics.read_all` returns `[]` until the optional gem is installed and a worker has created
-the file, so a dashboard can render an unavailable state without rescuing `LoadError`. Its
-snapshot is best-effort: fields are lock-free counters and are not globally atomic across
-workers.
+the file, so an observer can render an unavailable state without rescuing `LoadError`. Its
+snapshot is lock-free best effort: cumulative fields (`total_runs`, `total_successes`,
+`total_failures`, `total_timeouts`, `total_skips`) are counters; `active_jobs`,
+`last_run_at`, and `last_duration_ms` are gauges. Fields can describe adjacent moments in time
+rather than one globally atomic instant.
 
 By default the file is `/tmp/async-background.shm`. Set `ASYNC_BACKGROUND_METRICS_PATH`
-or pass `metrics_shm_path:` to `Runner.new` when a dashboard lives in another process or
-container; both sides must see the same mounted file.
+or pass `metrics_shm_path:` to `Runner.new` when another observer runs in a separate process
+or container; both sides must see the same mounted file.
+
+
 
 ## License
 

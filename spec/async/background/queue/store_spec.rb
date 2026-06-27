@@ -87,15 +87,28 @@ RSpec.describe Async::Background::Queue::Store, type: :unit do
       end
     end
 
-    it 'creates pending and status_finished_at indexes for dashboard queries' do
+    it 'creates only the enqueue-critical pending index by default' do
       store.enqueue('Probe', [])
       indexes = db.execute(
         "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='jobs'"
       )
-      index_names = indexes.map { |idx| idx[0] }
 
-      expect(index_names).to include('idx_jobs_pending')
-      expect(index_names).to include('idx_jobs_status_finished_at')
+      expect(indexes.map(&:first)).to contain_exactly('idx_jobs_pending')
+    end
+
+    it 'keeps dashboard indexes opt-in' do
+      store.prepare_dashboard!
+      store.enqueue('Probe', [])
+      indexes = db.execute(
+        "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='jobs'"
+      )
+
+      expect(indexes.map(&:first)).to contain_exactly(
+        'idx_jobs_pending',
+        'idx_jobs_done_finished_at',
+        'idx_jobs_failed_finished_at',
+        'idx_jobs_running'
+      )
     end
   end
 

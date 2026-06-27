@@ -312,6 +312,19 @@ RSpec.describe Async::Background::Queue::Client, type: :unit do
       Async::Background::Queue.enqueue(job_class, 1, 2)
     end
 
+    it 'shares immutable empty args for a zero-argument enqueue' do
+      expect(mock_store).to receive(:enqueue) do |class_name, args, run_at, options:|
+        expect(class_name).to eq('ModuleApiTestJob')
+        expect(args).to equal(Async::Background::Queue::EMPTY_ARGS)
+        expect(run_at).to be_nil
+        expect(options).to equal(Async::Background::Queue::EMPTY_OPTIONS)
+        1
+      end
+      expect(mock_notifier).to receive(:notify_all)
+
+      Async::Background::Queue.enqueue(job_class)
+    end
+
     it 'enqueue accepts a string class name' do
       expect(mock_store).to receive(:enqueue).with('SomeJob', ['x'], nil, options: {}).and_return(1)
       expect(mock_notifier).to receive(:notify_all)

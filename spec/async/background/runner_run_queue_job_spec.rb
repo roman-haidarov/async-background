@@ -121,18 +121,34 @@ RSpec.describe 'Async::Background::Runner#run_queue_job', type: :unit do
       expect(mock_store).to receive(:complete).and_return(true)
 
       expect(runner.metrics).to receive(:job_started).with(nil).ordered
-      expect(runner.metrics).to receive(:job_finished).with(nil, kind_of(Numeric)).ordered
+      expect(runner.metrics).to receive(:job_succeeded).with(nil, kind_of(Numeric)).ordered
+      expect(runner.metrics).to receive(:job_stopped).with(nil).ordered
 
       runner.send(:run_queue_job, passthrough_task, job)
     end
 
-    it 'does NOT increment job_finished if CAS lost (stale lease)' do
+    it 'does NOT increment job_succeeded if CAS lost (stale lease)' do
       allow(mock_store).to receive(:complete).and_return(false)
 
-      expect(runner.metrics).to receive(:job_started).with(nil)
-      expect(runner.metrics).not_to receive(:job_finished)
+      expect(runner.metrics).to receive(:job_started).with(nil).ordered
+      expect(runner.metrics).not_to receive(:job_succeeded)
+      expect(runner.metrics).to receive(:job_stopped).with(nil).ordered
 
       runner.send(:run_queue_job, passthrough_task, job)
+    end
+
+
+    it 'does not execute a job when its lease is lost before start' do
+      allow(mock_store).to receive(:mark_started!).and_return(false)
+
+      expect(mock_store).not_to receive(:complete)
+      expect(mock_store).not_to receive(:retry_or_fail)
+      expect(runner.metrics).not_to receive(:job_started)
+      expect(runner.metrics).not_to receive(:job_stopped)
+
+      runner.send(:run_queue_job, passthrough_task, job)
+
+      expect(RunQueueJobSpec_Ok.captured_args).to be_empty
     end
 
     it 'handles a job with no arguments' do
@@ -168,7 +184,8 @@ RSpec.describe 'Async::Background::Runner#run_queue_job', type: :unit do
 
       expect(runner.metrics).to receive(:job_started).with(nil).ordered
       expect(runner.metrics).to receive(:job_timed_out).with(nil).ordered
-      expect(runner.metrics).not_to receive(:job_finished)
+      expect(runner.metrics).to receive(:job_stopped).with(nil).ordered
+      expect(runner.metrics).not_to receive(:job_succeeded)
       expect(runner.metrics).not_to receive(:job_failed)
 
       runner.send(:run_queue_job, timeout_task, job)
@@ -177,9 +194,10 @@ RSpec.describe 'Async::Background::Runner#run_queue_job', type: :unit do
     it 'does NOT bump metrics on stale-lease timeout (CAS returns nil)' do
       allow(mock_store).to receive(:retry_or_fail).and_return(nil)
 
-      expect(runner.metrics).to receive(:job_started).with(nil)
+      expect(runner.metrics).to receive(:job_started).with(nil).ordered
       expect(runner.metrics).not_to receive(:job_timed_out)
       expect(runner.metrics).not_to receive(:job_failed)
+      expect(runner.metrics).to receive(:job_stopped).with(nil).ordered
 
       runner.send(:run_queue_job, timeout_task, job)
     end
@@ -215,7 +233,8 @@ RSpec.describe 'Async::Background::Runner#run_queue_job', type: :unit do
 
       expect(runner.metrics).to receive(:job_started).with(nil).ordered
       expect(runner.metrics).to receive(:job_failed).with(nil, kind_of(StandardError)).ordered
-      expect(runner.metrics).not_to receive(:job_finished)
+      expect(runner.metrics).to receive(:job_stopped).with(nil).ordered
+      expect(runner.metrics).not_to receive(:job_succeeded)
       expect(runner.metrics).not_to receive(:job_timed_out)
 
       runner.send(:run_queue_job, passthrough_task, job)
@@ -224,8 +243,9 @@ RSpec.describe 'Async::Background::Runner#run_queue_job', type: :unit do
     it 'does NOT bump metrics on stale-lease failure (CAS returns nil)' do
       allow(mock_store).to receive(:retry_or_fail).and_return(nil)
 
-      expect(runner.metrics).to receive(:job_started).with(nil)
+      expect(runner.metrics).to receive(:job_started).with(nil).ordered
       expect(runner.metrics).not_to receive(:job_failed)
+      expect(runner.metrics).to receive(:job_stopped).with(nil).ordered
 
       runner.send(:run_queue_job, passthrough_task, job)
     end
@@ -247,6 +267,8 @@ RSpec.describe 'Async::Background::Runner#run_queue_job', type: :unit do
              error_class: Async::Background::ConfigError,
              error_message: kind_of(String)).and_return(true)
       expect(mock_store).not_to receive(:retry_or_fail)
+      expect(runner.metrics).to receive(:job_failed).with(nil, instance_of(Async::Background::ConfigError))
+      expect(runner.metrics).not_to receive(:job_stopped)
 
       expect {
         runner.send(:run_queue_job, passthrough_task, job_unknown)
@@ -285,15 +307,18 @@ RSpec.describe 'Async::Background::Runner#run_queue_job', type: :unit do
       allow(mock_store).to receive(:retry_or_fail).and_return(:failed)
 
       expect(runner.metrics).to receive(:job_started).ordered
-      expect(runner.metrics).to receive(:job_finished).ordered
+      expect(runner.metrics).to receive(:job_succeeded).ordered
+      expect(runner.metrics).to receive(:job_stopped).ordered
       runner.send(:run_queue_job, passthrough_task, job_hash(id: 1, class_name: 'RunQueueJobSpec_Ok'))
 
       expect(runner.metrics).to receive(:job_started).ordered
       expect(runner.metrics).to receive(:job_timed_out).ordered
+      expect(runner.metrics).to receive(:job_stopped).ordered
       runner.send(:run_queue_job, timeout_task, job_hash(id: 2, class_name: 'RunQueueJobSpec_Slow'))
 
       expect(runner.metrics).to receive(:job_started).ordered
       expect(runner.metrics).to receive(:job_failed).ordered
+      expect(runner.metrics).to receive(:job_stopped).ordered
       runner.send(:run_queue_job, passthrough_task, job_hash(id: 3, class_name: 'RunQueueJobSpec_Raises'))
     end
   end

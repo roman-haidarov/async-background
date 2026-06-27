@@ -6,88 +6,73 @@ module Async
   module Background
     class Metrics
       SCHEMA_FIELDS = {
-        total_runs:       :u64,
-        total_successes:  :u64,
-        total_failures:   :u64,
-        total_timeouts:   :u64,
-        total_skips:      :u64,
-        active_jobs:      :u32,
-        last_run_at:      :u64,
+        total_runs: :u64,
+        total_successes: :u64,
+        total_failures: :u64,
+        total_timeouts: :u64,
+        total_skips: :u64,
+        active_jobs: :u32,
+        last_run_at: :u64,
         last_duration_ms: :u32
       }.freeze
+
+      EMPTY_HANDLES = {}.freeze
 
       attr_reader :registry, :shm_path, :unavailable_reason
 
       def initialize(worker_index:, total_workers:, shm_path: self.class.default_shm_path)
         @enabled = false
         @registry = nil
-        @metric_handles = {}
+        @metric_handles = EMPTY_HANDLES
         @shm_path = shm_path
         @unavailable_reason = nil
 
         validate_worker!(worker_index, total_workers)
-        self.class.load_utilization!
-
-        ensure_shm!(total_workers, shm_path)
-
-        @registry = ::Async::Utilization::Registry.new
-        unless @registry.respond_to?(:metric)
-          raise LoadError, 'async-utilization >= 0.3 is required for metrics'
-        end
-
-        attach_observer!(worker_index, total_workers, shm_path)
-        @metric_handles = SCHEMA_FIELDS.keys.to_h { |name| [name, @registry.metric(name)] }.freeze
-        @enabled = true
+        initialize_registry!(worker_index, total_workers, shm_path)
       rescue LoadError => error
-        @registry = nil
-        @metric_handles = {}.freeze
-        @unavailable_reason = error.message
+        mark_unavailable!(error)
       end
 
-      def enabled?
-        @enabled
-      end
+      def enabled? = @enabled
 
       def job_started(_entry)
         return unless enabled?
 
-        metric(:total_runs).increment
-        metric(:active_jobs).increment
-        metric(:last_run_at).set(Process.clock_gettime(Process::CLOCK_REALTIME).to_i)
+        increment(:total_runs)
+        increment(:active_jobs)
+        set(:last_run_at, Process.clock_gettime(Process::CLOCK_REALTIME).to_i)
       end
 
-      def job_finished(_entry, duration)
+      def job_succeeded(_entry, duration)
         return unless enabled?
 
-        metric(:active_jobs).decrement
-        metric(:total_successes).increment
-        metric(:last_duration_ms).set((duration * 1000).to_i)
+        increment(:total_successes)
+        set(:last_duration_ms, duration_to_milliseconds(duration))
+      end
+
+      def job_finished(entry, duration)
+        job_succeeded(entry, duration)
+        job_stopped(entry)
       end
 
       def job_failed(_entry, _error)
-        return unless enabled?
-
-        metric(:active_jobs).decrement
-        metric(:total_failures).increment
+        increment(:total_failures) if enabled?
       end
 
       def job_timed_out(_entry)
-        return unless enabled?
+        increment(:total_timeouts) if enabled?
+      end
 
-        metric(:active_jobs).decrement
-        metric(:total_timeouts).increment
+      def job_stopped(_entry)
+        decrement(:active_jobs) if enabled?
       end
 
       def job_skipped(_entry)
-        return unless enabled?
-
-        metric(:total_skips).increment
+        increment(:total_skips) if enabled?
       end
 
       def values
-        return {} unless enabled?
-
-        registry.values
+        enabled? ? registry.values : {}
       end
 
       class << self
@@ -107,36 +92,26 @@ module Async
           ::Async::Utilization::Schema.build(SCHEMA_FIELDS)
         end
 
-        # Read one best-effort snapshot for every worker from the shared-memory file.
-        # The values are independently updated counters, not a globally atomic snapshot.
-        # Returns an empty array when metrics are unavailable or workers have not created
-        # the shared-memory file yet, which keeps dashboard callers dependency-free.
         def read_all(total_workers:, path: default_shm_path)
           validate_total_workers!(total_workers)
-          return [] unless available?
-          return [] unless File.file?(path)
+          return [] unless available? && File.file?(path)
 
           layout = schema
           segment = segment_size
-          file_size = segment * total_workers
+          required_size = segment * total_workers
 
           File.open(path, 'rb') do |file|
-            file.flock(File::LOCK_SH)
-            return [] if file.size < file_size
+            return [] if file.size < required_size
 
-            buffer = IO::Buffer.map(file, file_size, 0, IO::Buffer::READONLY)
-            decode_all(buffer, layout, segment, total_workers)
-          ensure
-            file.flock(File::LOCK_UN) rescue nil
+            buffer = IO::Buffer.map(file, required_size, 0, IO::Buffer::READONLY)
+            decode_workers(buffer, layout, segment, total_workers)
           end
         rescue Errno::ENOENT
           []
         end
 
         def default_shm_path
-          ENV.fetch('ASYNC_BACKGROUND_METRICS_PATH') do
-            File.join(Dir.tmpdir, 'async-background.shm')
-          end
+          ENV.fetch('ASYNC_BACKGROUND_METRICS_PATH') { File.join(Dir.tmpdir, 'async-background.shm') }
         end
 
         def segment_size
@@ -151,21 +126,60 @@ module Async
           raise ArgumentError, 'total_workers must be a positive Integer'
         end
 
-        def decode_all(buffer, schema, segment, total_workers)
+        def decode_workers(buffer, schema, segment, total_workers)
           (1..total_workers).map do |worker|
-            base = (worker - 1) * segment
-            values = schema.fields.each_with_object(worker: worker) do |field, row|
-              row[field.name] = buffer.get_value(field.type, base + field.offset)
-            end
-            values.freeze
+            decode_worker(buffer, schema, segment, worker)
+          end.freeze
+        end
+
+        def decode_worker(buffer, schema, segment, worker)
+          offset = (worker - 1) * segment
+          schema.fields.each_with_object(worker: worker) do |field, values|
+            values[field.name] = buffer.get_value(field.type, offset + field.offset)
           end.freeze
         end
       end
 
       private
 
+      def initialize_registry!(worker_index, total_workers, path)
+        self.class.load_utilization!
+        ensure_shm!(total_workers, path)
+
+        @registry = ::Async::Utilization::Registry.new
+        unless @registry.respond_to?(:metric)
+          raise LoadError, 'async-utilization >= 0.3 is required for metrics'
+        end
+
+        attach_observer!(worker_index, path)
+        @metric_handles = SCHEMA_FIELDS.keys.to_h { |name| [name, @registry.metric(name)] }.freeze
+        @enabled = true
+      end
+
+      def mark_unavailable!(error)
+        @registry = nil
+        @metric_handles = EMPTY_HANDLES
+        @unavailable_reason = error.message
+      end
+
+      def increment(name)
+        metric(name).increment
+      end
+
+      def decrement(name)
+        metric(name).decrement
+      end
+
+      def set(name, value)
+        metric(name).set(value)
+      end
+
       def metric(name)
         @metric_handles.fetch(name)
+      end
+
+      def duration_to_milliseconds(duration)
+        (duration * 1000).to_i
       end
 
       def validate_worker!(worker_index, total_workers)
@@ -176,24 +190,23 @@ module Async
       end
 
       def ensure_shm!(total_workers, path)
-        required = self.class.segment_size * total_workers
+        required_size = self.class.segment_size * total_workers
 
         File.open(path, File::CREAT | File::RDWR, 0o644) do |file|
           file.flock(File::LOCK_EX)
-          file.truncate(required) if file.size < required
+          file.truncate(required_size) if file.size < required_size
         ensure
           file.flock(File::LOCK_UN) rescue nil
         end
       end
 
-      def attach_observer!(worker_index, total_workers, path)
+      def attach_observer!(worker_index, path)
         segment = self.class.segment_size
-        offset = (worker_index - 1) * segment
         observer = ::Async::Utilization::Observer.open(
           self.class.schema,
           path,
           segment,
-          offset
+          (worker_index - 1) * segment
         )
         registry.observer = observer
       end
