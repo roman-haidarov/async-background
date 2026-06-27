@@ -69,9 +69,10 @@ A single `falcon.rb` defines three things: the web server, the background schedu
 require "falcon/environment/rack"
 require "async/service/generic"
 
-TOTAL_BG  = ENV.fetch("BACKGROUND_FORKS", 0).to_i
-DB_PATH   = ENV.fetch("QUEUE_DB_PATH",     "/app/tmp/queue/background.db")
-SOCK_DIR  = ENV.fetch("QUEUE_SOCKET_DIR",  "/app/tmp/queue/sockets")
+TOTAL_BG     = ENV.fetch("BACKGROUND_FORKS", 0).to_i
+DB_PATH      = ENV.fetch("QUEUE_DB_PATH", "/app/tmp/queue/background.db")
+SOCK_DIR     = ENV.fetch("QUEUE_SOCKET_DIR", "/app/tmp/queue/sockets")
+METRICS_PATH = ENV.fetch("ASYNC_BACKGROUND_METRICS_PATH", "/app/tmp/queue/async-background.shm")
 
 # ── Web server (also enqueues into the queue) ──
 service "web" do
@@ -138,8 +139,9 @@ if TOTAL_BG > 0
                 job_count:        ENV.fetch("LIMIT_JOB_COUNT", 2).to_i,
                 worker_index:     i + 1,
                 total_workers:    TOTAL_BG,
-                queue_socket_dir: SOCK_DIR,
-                queue_db_path:    DB_PATH
+                queue_socket_dir:  SOCK_DIR,
+                queue_db_path:     DB_PATH,
+                metrics_shm_path:  METRICS_PATH
               )
 
               Async::Background::Queue.default_client = Async::Background::Queue::Client.new(
@@ -184,8 +186,22 @@ end
 | `QUEUE_DB_PATH` | `/app/tmp/queue/background.db` | SQLite database path |
 | `QUEUE_SOCKET_DIR` | `/app/tmp/queue/sockets` | Directory for cross-process wake-up sockets |
 | `ISOLATION_FORKS` | _(empty)_ | Comma-separated worker indices excluded from queue (e.g. `1,3`) |
+| `ASYNC_BACKGROUND_METRICS_PATH` | `/tmp/async-background.shm` | Optional metrics shared-memory file; mount a common path for workers and dashboard |
 
 ---
+
+### Optional metrics
+
+Install `async-utilization` only in applications that need the worker metrics or dashboard:
+
+```ruby
+gem "async-utilization", ">= 0.3", "< 0.5"
+```
+
+The queue and scheduler do not depend on it. With the gem absent, `runner.metrics.enabled?`
+is `false` and `Async::Background::Metrics.read_all(...)` returns `[]`. When web and
+background run in separate containers, point `ASYNC_BACKGROUND_METRICS_PATH` at a file under
+a shared volume (for example `/app/tmp/queue/async-background.shm`).
 
 &nbsp;
 

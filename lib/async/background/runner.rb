@@ -2,6 +2,7 @@
 
 require 'yaml'
 require 'zlib'
+require 'async/barrier'
 
 module Async
   module Background
@@ -11,6 +12,7 @@ module Async
     MIN_SLEEP_TIME      = 0.1
     MAX_JITTER          = 5
     QUEUE_POLL_INTERVAL = 5
+    MIN_QUEUE_WAIT      = 0.001
 
     class Runner
       include Clock
@@ -19,19 +21,25 @@ module Async
 
       def initialize(
         config_path:, job_count: 2, worker_index:, total_workers:,
-        queue_socket_dir: nil, queue_db_path: nil, queue_mmap: true
+        queue_socket_dir: nil, queue_db_path: nil, queue_mmap: true,
+        metrics_shm_path: Metrics.default_shm_path
       )
         @logger        = Console.logger
         @worker_index  = worker_index
         @total_workers = total_workers
         @running       = true
         @shutdown      = ::Async::Condition.new
-        @metrics       = Metrics.new(worker_index: worker_index, total_workers: total_workers)
+        @metrics       = Metrics.new(
+          worker_index: worker_index,
+          total_workers: total_workers,
+          shm_path: metrics_shm_path
+        )
 
         logger.info { "Async::Background worker_index=#{worker_index}/#{total_workers}, job_count=#{job_count}" }
 
-        @semaphore = ::Async::Semaphore.new(job_count)
-        @heap      = build_heap(config_path)
+        @drain_barrier = ::Async::Barrier.new
+        @semaphore     = ::Async::Semaphore.new(job_count, parent: @drain_barrier)
+        @heap          = build_heap(config_path)
 
         setup_queue(queue_socket_dir, queue_db_path, queue_mmap)
       end
@@ -44,7 +52,7 @@ module Async
 
           scheduler_loop(task)
 
-          semaphore.acquire {}
+          @drain_barrier.wait
           @queue_store&.close
           @queue_waker&.close
         end
@@ -97,7 +105,7 @@ module Async
           logger.info { "Async::Background queue: listening on worker #{worker_index}" }
 
           while running?
-            @queue_waker.wait(timeout: QUEUE_POLL_INTERVAL)
+            @queue_waker.wait(timeout: next_wait_timeout)
 
             while running?
               job = @queue_store.fetch(worker_index)
@@ -109,29 +117,67 @@ module Async
         end
       end
 
-      def run_queue_job(job_task, job)
-        class_name = job[:class_name]
-        klass      = resolve_job_class(class_name)
-        options    = parse_job_options(job[:options])
+      def next_wait_timeout
+        next_due = @queue_store.next_pending_run_at
+        return QUEUE_POLL_INTERVAL unless next_due
 
-        metrics.job_started(nil)
+        remaining = next_due - realtime_now
+        return MIN_QUEUE_WAIT if remaining <= 0
+
+        [remaining, QUEUE_POLL_INTERVAL].min
+      end
+
+      def run_queue_job(job_task, job)
+        class_name  = job[:class_name]
+        claim_token = job[:claim_token]
+        options     = nil
+        started     = nil
+
+        klass    = resolve_job_class(class_name)
+        options  = parse_job_options(job[:options])
+
+        lease_alive = @queue_store.mark_started!(job[:id], claim_token: claim_token)
+        metrics.job_started(nil) if lease_alive
+
         started = monotonic_now
         job_task.with_timeout(options.timeout) { klass.perform_now(*job[:args]) }
         duration = monotonic_now - started
 
-        metrics.job_finished(nil, duration)
-        @queue_store.complete(job[:id])
-        logger.info('Async::Background') { "queue(#{class_name}): completed in #{duration.round(2)}s" }
+        if @queue_store.complete(job[:id], claim_token: claim_token, duration_ms: duration_ms(duration))
+          metrics.job_finished(nil, duration)
+          logger.info('Async::Background') { "queue(#{class_name}): completed in #{duration.round(2)}s" }
+        else
+          logger.warn('Async::Background') do
+            "queue(#{class_name}): complete: stale lease for job #{job[:id]}, ignored"
+          end
+        end
       rescue ConfigError => e
-        metrics.job_failed(nil, e) if options
-        @queue_store.fail(job[:id])
+        recorded = @queue_store.fail(
+          job[:id],
+          claim_token: claim_token,
+          error_class: e.class,
+          error_message: e.message
+        )
+        metrics.job_failed(nil, e) if recorded && options
         logger.error('Async::Background') { "queue(#{class_name}): #{e.class} #{e.message}" }
-      rescue ::Async::TimeoutError
-        metrics.job_timed_out(nil)
-        handle_queue_failure(job, options, "timed out after #{options.timeout}s", backtrace: nil)
+      rescue ::Async::TimeoutError => e
+        handle_queue_failure(
+          job, options,
+          "timed out after #{options&.timeout}s",
+          error: e,
+          duration: started && (monotonic_now - started),
+          timeout: true,
+          backtrace: nil
+        )
       rescue => e
-        metrics.job_failed(nil, e)
-        handle_queue_failure(job, options, "#{e.class} #{e.message}", backtrace: e.backtrace)
+        handle_queue_failure(
+          job, options,
+          "#{e.class} #{e.message}",
+          error: e,
+          duration: started && (monotonic_now - started),
+          timeout: false,
+          backtrace: e.backtrace
+        )
       end
 
       def parse_job_options(raw)
@@ -140,20 +186,47 @@ module Async
         raise ConfigError, "invalid queue options: #{e.message}"
       end
 
-      def handle_queue_failure(job, options, message, backtrace:)
-        result = @queue_store.retry_or_fail(job[:id], fallback_options: options)
+      def handle_queue_failure(job, options, message, error:, duration:, timeout:, backtrace:)
         class_name = job[:class_name]
+        error_message = timeout ? message : error.message
+
+        result = @queue_store.retry_or_fail(
+          job[:id],
+          claim_token: job[:claim_token],
+          error_class: error.class,
+          error_message: error_message,
+          fallback_options: options,
+          duration_ms: duration_ms(duration)
+        )
+
+        if result.nil?
+          logger.warn('Async::Background') do
+            "queue(#{class_name}): #{timeout ? 'timeout' : 'failure'} on stale lease for job #{job[:id]}, ignored"
+          end
+          return
+        end
+
+        if timeout
+          metrics.job_timed_out(nil)
+        else
+          metrics.job_failed(nil, error)
+        end
 
         if result == :retried
           @queue_waker&.signal
-          attempt = options.next_attempt
+          attempt = options&.next_attempt
           logger.warn('Async::Background') do
-            "queue(#{class_name}): #{message}; retry #{attempt}/#{options.retry}"
+            "queue(#{class_name}): #{message}; retry #{attempt}/#{options&.retry}"
           end
         else
           tail = backtrace ? "\n#{backtrace.join("\n")}" : ''
           logger.error('Async::Background') { "queue(#{class_name}): #{message}#{tail}" }
         end
+      end
+
+      def duration_ms(duration)
+        return nil if duration.nil? || duration.negative?
+        (duration * 1000).to_i
       end
 
       def resolve_job_class(class_name)

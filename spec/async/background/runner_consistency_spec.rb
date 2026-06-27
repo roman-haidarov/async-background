@@ -111,9 +111,15 @@ RSpec.describe 'Runner consistency fixes', type: :unit do
 
     it 'fails (does not retry) when persisted options are invalid' do
       # retry: 2 without retry_delay is a validation error at Options.new time
-      bad_job = { id: 99, class_name: 'ConsistencySpec_Job', args: [], options: { retry: 2 } }
+      bad_job = { id: 99, class_name: 'ConsistencySpec_Job', args: [], options: { retry: 2 }, claim_token: 'tok-99' }
 
-      expect(mock_store).to receive(:fail).with(99)
+      allow(mock_store).to receive(:mark_started!).and_return(true)
+      expect(mock_store).to receive(:fail).with(
+        99,
+        claim_token: 'tok-99',
+        error_class: Async::Background::ConfigError,
+        error_message: kind_of(String)
+      ).and_return(true)
       expect(mock_store).not_to receive(:retry_or_fail)
 
       expect {
@@ -122,9 +128,15 @@ RSpec.describe 'Runner consistency fixes', type: :unit do
     end
 
     it 'fails (does not retry) when backoff value is not in the allowed set' do
-      bad_job = { id: 100, class_name: 'ConsistencySpec_Job', args: [], options: { backoff: :nonsense } }
+      bad_job = { id: 100, class_name: 'ConsistencySpec_Job', args: [], options: { backoff: :nonsense }, claim_token: 'tok-100' }
 
-      expect(mock_store).to receive(:fail).with(100)
+      allow(mock_store).to receive(:mark_started!).and_return(true)
+      expect(mock_store).to receive(:fail).with(
+        100,
+        claim_token: 'tok-100',
+        error_class: Async::Background::ConfigError,
+        error_message: kind_of(String)
+      ).and_return(true)
       expect(mock_store).not_to receive(:retry_or_fail)
 
       expect {

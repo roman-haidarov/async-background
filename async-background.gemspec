@@ -36,8 +36,9 @@ Gem::Specification.new do |spec|
 
   # Optional: add to your own Gemfile if you need these features
   #   gem 'sqlite3',          '~> 2.0'  # dynamic job queue
-  #   gem 'async-utilization', '~> 0.3' # shared-memory worker metrics
+  #   gem 'async-utilization', '>= 0.3', '< 0.5' # shared-memory worker metrics
 
   spec.add_development_dependency 'rake',  '~> 13.0'
   spec.add_development_dependency 'rspec', '~> 3.12'
+  spec.add_development_dependency 'async-utilization', '>= 0.3', '< 0.5'
 end

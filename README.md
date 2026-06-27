@@ -13,7 +13,7 @@ A lightweight cron, interval, and job-queue scheduler for Ruby's [Async](https:/
 - Ruby >= 3.3
 - `async ~> 2.0`, `fugit ~> 1.0`
 - `sqlite3 ~> 2.0` (optional, for the job queue)
-- `async-utilization ~> 0.3` (optional, for metrics)
+- `async-utilization >= 0.3, < 0.5` (optional, for metrics)
 
 ## Install
 
@@ -21,7 +21,7 @@ A lightweight cron, interval, and job-queue scheduler for Ruby's [Async](https:/
 # Gemfile
 gem "async-background"
 gem "sqlite3", "~> 2.0"            # optional
-gem "async-utilization", "~> 0.3"  # optional
+gem "async-utilization", ">= 0.3", "< 0.5"  # optional
 ```
 
 ## ➡️ [Get Started](docs/GET_STARTED.md)
@@ -129,17 +129,28 @@ Jobs are persisted in SQLite, so a missed wake-up is never a lost job — worker
 
 ## Metrics
 
-With `async-utilization` installed, per-worker stats land in shared memory at `/tmp/async-background.shm` with lock-free updates.
+Metrics are an optional integration with `async-utilization` (`>= 0.3`, `< 0.5`). The
+background worker remains fully functional when that gem is absent. With it installed, each
+worker publishes counters to a shared-memory segment.
 
 ```ruby
+runner.metrics.enabled?
 runner.metrics.values
 # => { total_runs: 142, total_successes: 140, total_failures: 2,
 #      total_timeouts: 0, total_skips: 5, active_jobs: 1, ... }
 
 Async::Background::Metrics.read_all(total_workers: 2)
+# => [{ worker: 1, ... }, { worker: 2, ... }]
 ```
 
-Without the gem, metrics are silently disabled — zero overhead.
+`Metrics.read_all` returns `[]` until the optional gem is installed and a worker has created
+the file, so a dashboard can render an unavailable state without rescuing `LoadError`. Its
+snapshot is best-effort: fields are lock-free counters and are not globally atomic across
+workers.
+
+By default the file is `/tmp/async-background.shm`. Set `ASYNC_BACKGROUND_METRICS_PATH`
+or pass `metrics_shm_path:` to `Runner.new` when a dashboard lives in another process or
+container; both sides must see the same mounted file.
 
 ## License
 

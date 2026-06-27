@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'json'
+require 'securerandom'
 require_relative '../clock'
 
 module Async
@@ -55,21 +56,46 @@ module Async
         SCHEMA = <<~SQL
           PRAGMA auto_vacuum = INCREMENTAL;
           CREATE TABLE IF NOT EXISTS jobs (
-            id         INTEGER PRIMARY KEY,
-            class_name TEXT    NOT NULL,
-            args       TEXT    NOT NULL DEFAULT '[]',
-            options    TEXT,
-            status     TEXT    NOT NULL DEFAULT 'pending',
-            created_at REAL    NOT NULL,
-            run_at     REAL    NOT NULL,
-            locked_by  INTEGER,
-            locked_at  REAL
+            id                 INTEGER PRIMARY KEY,
+            class_name         TEXT    NOT NULL,
+            args               TEXT    NOT NULL DEFAULT '[]',
+            options            TEXT,
+            status             TEXT    NOT NULL DEFAULT 'pending',
+            created_at         REAL    NOT NULL,
+            run_at             REAL    NOT NULL,
+            locked_by          INTEGER,
+            locked_at          REAL,
+            claim_token        TEXT,
+            started_at         REAL,
+            finished_at        REAL,
+            duration_ms        INTEGER,
+            last_error_class   TEXT,
+            last_error_message TEXT
           );
-          CREATE INDEX IF NOT EXISTS idx_jobs_pending ON jobs(run_at, id) WHERE status = 'pending';
+          CREATE INDEX IF NOT EXISTS idx_jobs_pending
+            ON jobs(run_at, id) WHERE status = 'pending';
+          CREATE INDEX IF NOT EXISTS idx_jobs_status_finished_at
+            ON jobs(status, finished_at);
         SQL
 
-        CLEANUP_INTERVAL = 300
-        CLEANUP_AGE      = 3600
+        MIGRATIONS = [
+          "ALTER TABLE jobs ADD COLUMN options TEXT",
+          "ALTER TABLE jobs ADD COLUMN claim_token TEXT",
+          "ALTER TABLE jobs ADD COLUMN started_at REAL",
+          "ALTER TABLE jobs ADD COLUMN finished_at REAL",
+          "ALTER TABLE jobs ADD COLUMN duration_ms INTEGER",
+          "ALTER TABLE jobs ADD COLUMN last_error_class TEXT",
+          "ALTER TABLE jobs ADD COLUMN last_error_message TEXT",
+          "UPDATE jobs SET finished_at = created_at " \
+            "WHERE finished_at IS NULL AND status IN ('done', 'failed')",
+          "CREATE INDEX IF NOT EXISTS idx_jobs_status_finished_at " \
+            "ON jobs(status, finished_at)"
+        ].freeze
+
+        CLEANUP_INTERVAL       = 300
+        CLEANUP_AGE            = 3600
+        FAILED_RETENTION_AGE   = 7 * 24 * 3600
+        ERROR_MESSAGE_MAX_LEN  = 2_000
 
         attr_reader :path, :options
 
@@ -87,6 +113,7 @@ module Async
           db = SQLite3::Database.new(@path)
           configure_database(db)
           db.execute_batch(SCHEMA)
+          MIGRATIONS.each { |sql| db.execute(sql) rescue nil }
           db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
           db.close
           @schema_checked = true
@@ -101,39 +128,80 @@ module Async
 
         def fetch(worker_id)
           ensure_connection
-          now = realtime_now
+          now    = realtime_now
+          token  = generate_claim_token
 
-          row = transaction { with_stmt(@fetch_stmt) { |s| s.execute(worker_id, now, now).first } }
+          row = transaction { with_stmt(@fetch_stmt) { |s| s.execute(worker_id, now, token, now).first } }
           return unless row
 
           maybe_cleanup
-          { id: row[0], class_name: row[1], args: JSON.parse(row[2]), options: load_options(row[3]) }
+          {
+            id:          row[0],
+            class_name:  row[1],
+            args:        JSON.parse(row[2]),
+            options:     load_options(row[3]),
+            claim_token: token
+          }
         end
 
-        def complete(job_id)
+        def mark_started!(job_id, claim_token:, started_at: realtime_now)
           ensure_connection
-          @complete_stmt.execute(job_id)
+          @mark_started_stmt.execute(started_at, job_id, claim_token)
+          @db.changes.positive?
         end
 
-        def fail(job_id)
+        def complete(job_id, claim_token:, finished_at: realtime_now, duration_ms: nil)
           ensure_connection
-          @fail_stmt.execute(job_id)
+          @complete_stmt.execute(finished_at, duration_ms, job_id, claim_token)
+          @db.changes.positive?
         end
 
-        def retry_or_fail(job_id, fallback_options: nil)
+        def fail(job_id, claim_token:, error_class: nil, error_message: nil, finished_at: realtime_now, duration_ms: nil)
+          ensure_connection
+          @fail_stmt.execute(
+            finished_at,
+            duration_ms,
+            error_class&.to_s,
+            truncate_message(error_message),
+            job_id,
+            claim_token
+          )
+          @db.changes.positive?
+        end
+
+        def retry_or_fail(job_id, claim_token:, error_class: nil, error_message: nil, fallback_options: nil, finished_at: realtime_now, duration_ms: nil)
           ensure_connection
 
           transaction do
-            stored = with_stmt(@retry_state_stmt) { |s| load_options(s.execute(job_id).first&.first) }
+            stored = with_stmt(@retry_state_stmt) { |s| load_options(s.execute(job_id, claim_token).first&.first) }
+
+            unless lease_alive?(job_id, claim_token)
+              next nil
+            end
+
             policy = stored.empty? ? normalize_options(fallback_options) : Job::Options.new(**stored)
 
             if policy&.retry? && policy.next_attempt <= policy.retry
               advanced = policy.with_attempt(policy.next_attempt)
-              @retry_stmt.execute(realtime_now + advanced.next_retry_delay(advanced.attempt), dump_options(advanced.to_h.compact), job_id)
-              :retried
+              @retry_stmt.execute(
+                realtime_now + advanced.next_retry_delay(advanced.attempt),
+                dump_options(advanced.to_h.compact),
+                error_class&.to_s,
+                truncate_message(error_message),
+                job_id,
+                claim_token
+              )
+              @db.changes.positive? ? :retried : nil
             else
-              @fail_stmt.execute(job_id)
-              :failed
+              @fail_stmt.execute(
+                finished_at,
+                duration_ms,
+                error_class&.to_s,
+                truncate_message(error_message),
+                job_id,
+                claim_token
+              )
+              @db.changes.positive? ? :failed : nil
             end
           end
         end
@@ -142,6 +210,17 @@ module Async
           ensure_connection
           @requeue_stmt.execute(worker_id)
           @db.changes
+        end
+
+        def next_pending_run_at
+          ensure_connection
+          row = with_stmt(@next_pending_stmt) { |s| s.execute.first }
+          row && row[0]
+        end
+
+        def data_version
+          ensure_connection
+          @db.execute("PRAGMA data_version").first[0]
         end
 
         def close
@@ -158,6 +237,23 @@ module Async
         end
 
         private
+
+        def generate_claim_token
+          SecureRandom.hex(16)
+        end
+
+        def truncate_message(msg)
+          return nil if msg.nil?
+          s = msg.to_s
+          s.length > ERROR_MESSAGE_MAX_LEN ? s.byteslice(0, ERROR_MESSAGE_MAX_LEN) : s
+        end
+
+        def lease_alive?(job_id, claim_token)
+          with_stmt(@lease_check_stmt) do |s|
+            row = s.execute(job_id, claim_token).first
+            !row.nil?
+          end
+        end
 
         def require_sqlite3
           require 'sqlite3'
@@ -177,7 +273,7 @@ module Async
 
           unless @schema_checked
             @db.execute_batch(SCHEMA)
-            @db.execute("ALTER TABLE jobs ADD COLUMN options TEXT") rescue nil
+            MIGRATIONS.each { |sql| @db.execute(sql) rescue nil }
             @schema_checked = true
           end
 
@@ -228,7 +324,13 @@ module Async
 
           @fetch_stmt = @db.prepare(<<~SQL)
             UPDATE jobs
-            SET    status = 'running', locked_by = ?, locked_at = ?
+            SET    status      = 'running',
+                   locked_by   = ?,
+                   locked_at   = ?,
+                   claim_token = ?,
+                   started_at  = NULL,
+                   finished_at = NULL,
+                   duration_ms = NULL
             WHERE  id = (
               SELECT id FROM jobs
               WHERE  status = 'pending' AND run_at <= ?
@@ -238,35 +340,103 @@ module Async
             RETURNING id, class_name, args, options
           SQL
 
-          @complete_stmt    = @db.prepare("UPDATE jobs SET status = 'done',   locked_by = NULL, locked_at = NULL WHERE id = ?")
-          @fail_stmt        = @db.prepare("UPDATE jobs SET status = 'failed', locked_by = NULL, locked_at = NULL WHERE id = ?")
-          @retry_state_stmt = @db.prepare("SELECT options FROM jobs WHERE id = ?")
-          @retry_stmt       = @db.prepare(
-            "UPDATE jobs SET status = 'pending', locked_by = NULL, locked_at = NULL, run_at = ?, options = ? WHERE id = ?"
+          @mark_started_stmt = @db.prepare(<<~SQL)
+            UPDATE jobs
+            SET    started_at = ?
+            WHERE  id = ? AND claim_token = ? AND status = 'running' AND started_at IS NULL
+          SQL
+
+          @complete_stmt = @db.prepare(<<~SQL)
+            UPDATE jobs
+            SET    status      = 'done',
+                   locked_by   = NULL,
+                   locked_at   = NULL,
+                   finished_at = ?,
+                   duration_ms = ?
+            WHERE  id = ? AND claim_token = ? AND status = 'running'
+          SQL
+
+          @fail_stmt = @db.prepare(<<~SQL)
+            UPDATE jobs
+            SET    status             = 'failed',
+                   locked_by          = NULL,
+                   locked_at          = NULL,
+                   finished_at        = ?,
+                   duration_ms        = ?,
+                   last_error_class   = ?,
+                   last_error_message = ?
+            WHERE  id = ? AND claim_token = ? AND status = 'running'
+          SQL
+
+          @retry_state_stmt = @db.prepare(
+            "SELECT options FROM jobs WHERE id = ? AND claim_token = ? AND status = 'running'"
           )
-          @requeue_stmt = @db.prepare(
-            "UPDATE jobs SET status = 'pending', locked_by = NULL, locked_at = NULL " \
-            "WHERE status = 'running' AND locked_by = ?"
+          @lease_check_stmt = @db.prepare(
+            "SELECT 1 FROM jobs WHERE id = ? AND claim_token = ? AND status = 'running'"
           )
-          @cleanup_stmt = @db.prepare("DELETE FROM jobs WHERE status = 'done' AND created_at < ?")
+
+          @retry_stmt = @db.prepare(<<~SQL)
+            UPDATE jobs
+            SET    status             = 'pending',
+                   locked_by          = NULL,
+                   locked_at          = NULL,
+                   claim_token        = NULL,
+                   started_at         = NULL,
+                   finished_at        = NULL,
+                   duration_ms        = NULL,
+                   run_at             = ?,
+                   options            = ?,
+                   last_error_class   = ?,
+                   last_error_message = ?
+            WHERE  id = ? AND claim_token = ? AND status = 'running'
+          SQL
+
+          @requeue_stmt = @db.prepare(<<~SQL)
+            UPDATE jobs
+            SET    status      = 'pending',
+                   locked_by   = NULL,
+                   locked_at   = NULL,
+                   claim_token = NULL,
+                   started_at  = NULL
+            WHERE  status = 'running' AND locked_by = ?
+          SQL
+
+          @cleanup_done_stmt = @db.prepare(
+            "DELETE FROM jobs WHERE status = 'done' AND finished_at IS NOT NULL AND finished_at < ?"
+          )
+          @cleanup_failed_stmt = @db.prepare(
+            "DELETE FROM jobs WHERE status = 'failed' AND finished_at IS NOT NULL AND finished_at < ?"
+          )
+
+          @next_pending_stmt = @db.prepare(
+            "SELECT MIN(run_at) FROM jobs WHERE status = 'pending'"
+          )
         end
 
         def finalize_statements
-          [@enqueue_stmt, @fetch_stmt, @complete_stmt, @fail_stmt,
-           @retry_state_stmt, @retry_stmt, @requeue_stmt, @cleanup_stmt].each do |stmt|
-            stmt&.close rescue next
-          end
+          [
+            @enqueue_stmt, @fetch_stmt, @mark_started_stmt,
+            @complete_stmt, @fail_stmt, @retry_state_stmt, @lease_check_stmt,
+            @retry_stmt, @requeue_stmt,
+            @cleanup_done_stmt, @cleanup_failed_stmt,
+            @next_pending_stmt
+          ].each { |stmt| stmt&.close rescue next }
 
-          @enqueue_stmt = @fetch_stmt = @complete_stmt = @fail_stmt = nil
-          @retry_state_stmt = @retry_stmt = @requeue_stmt = @cleanup_stmt = nil
+          @enqueue_stmt = @fetch_stmt = @mark_started_stmt = nil
+          @complete_stmt = @fail_stmt = @retry_state_stmt = @lease_check_stmt = nil
+          @retry_stmt = @requeue_stmt = nil
+          @cleanup_done_stmt = @cleanup_failed_stmt = nil
+          @next_pending_stmt = nil
         end
 
         def maybe_cleanup
-          now = monotonic_now
-          return if (now - @last_cleanup_at) < CLEANUP_INTERVAL
+          now_mono = monotonic_now
+          return if (now_mono - @last_cleanup_at) < CLEANUP_INTERVAL
 
-          @last_cleanup_at = now
-          @cleanup_stmt.execute(realtime_now - CLEANUP_AGE)
+          @last_cleanup_at = now_mono
+          now_real = realtime_now
+          @cleanup_done_stmt.execute(now_real - CLEANUP_AGE)
+          @cleanup_failed_stmt.execute(now_real - FAILED_RETENTION_AGE)
           @db.execute("PRAGMA incremental_vacuum") if @db.changes > 100
         end
       end

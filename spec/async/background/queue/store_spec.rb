@@ -72,17 +72,22 @@ RSpec.describe Async::Background::Queue::Store, type: :unit do
       expect(result).not_to be_empty
     end
 
-    it 'creates proper table structure' do
+    it 'creates proper table structure including 0.7.2 lifecycle columns' do
       store.enqueue('Probe', [])
       columns = db.execute("PRAGMA table_info(jobs)")
       column_names = columns.map { |col| col[1] }
 
-      %w[id class_name args options status created_at run_at locked_by locked_at].each do |required|
-        expect(column_names).to include(required)
+      required = %w[
+        id class_name args options status created_at run_at locked_by locked_at
+        claim_token started_at finished_at duration_ms
+        last_error_class last_error_message
+      ]
+      required.each do |col|
+        expect(column_names).to include(col)
       end
     end
 
-    it 'creates indexes for performance' do
+    it 'creates pending and status_finished_at indexes for dashboard queries' do
       store.enqueue('Probe', [])
       indexes = db.execute(
         "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='jobs'"
@@ -90,6 +95,7 @@ RSpec.describe Async::Background::Queue::Store, type: :unit do
       index_names = indexes.map { |idx| idx[0] }
 
       expect(index_names).to include('idx_jobs_pending')
+      expect(index_names).to include('idx_jobs_status_finished_at')
     end
   end
 
@@ -153,6 +159,16 @@ RSpec.describe Async::Background::Queue::Store, type: :unit do
       expect(created_at).to be >= before_time
       expect(created_at).to be <= after_time
     end
+
+    it 'does not set claim_token / lifecycle fields on a fresh enqueue' do
+      job_id = store.enqueue('Fresh', [])
+      row = db.execute(
+        "SELECT claim_token, started_at, finished_at, duration_ms, last_error_class, last_error_message " \
+        "FROM jobs WHERE id = ?", [job_id]
+      ).first
+
+      expect(row).to all(be_nil)
+    end
   end
 
   describe '#fetch' do
@@ -164,25 +180,43 @@ RSpec.describe Async::Background::Queue::Store, type: :unit do
         store.enqueue('FutureJob', ['arg2'], Time.now.to_f + 3600)
       end
 
-      it 'returns ready job' do
+      it 'returns ready job with claim_token' do
         job = store.fetch(worker_id)
 
         expect(job).not_to be_nil
         expect(job[:class_name]).to eq('ReadyJob')
         expect(job[:args]).to eq(['arg1'])
         expect(job[:id]).to be_a(Integer)
+        expect(job[:claim_token]).to be_a(String)
+        expect(job[:claim_token].length).to be >= 16
       end
 
-      it 'marks job as running and locks it' do
+      it 'marks job as running, locks it, and persists claim_token' do
         job = store.fetch(worker_id)
 
         row = db.execute(
-          "SELECT status, locked_by, locked_at FROM jobs WHERE id = ?", [job[:id]]
+          "SELECT status, locked_by, locked_at, claim_token, started_at, finished_at " \
+          "FROM jobs WHERE id = ?", [job[:id]]
         ).first
 
         expect(row[0]).to eq('running')
         expect(row[1]).to eq(worker_id)
         expect(row[2]).to be_a(Float)
+        expect(row[3]).to eq(job[:claim_token])
+        expect(row[4]).to be_nil
+        expect(row[5]).to be_nil
+      end
+
+      it 'gives each fetch a fresh claim_token even on re-claim after recover' do
+        first = store.fetch(worker_id)
+        first_token = first[:claim_token]
+
+        store.recover(worker_id)
+        # job is back to pending; lower its run_at so we can refetch immediately
+        db.execute("UPDATE jobs SET run_at = ? WHERE id = ?", [Time.now.to_f - 5, first[:id]])
+
+        second = store.fetch(worker_id)
+        expect(second[:claim_token]).not_to eq(first_token)
       end
 
       it 'does not return future jobs' do
@@ -251,55 +285,163 @@ RSpec.describe Async::Background::Queue::Store, type: :unit do
         ids = [store.fetch(worker_id)[:id], store.fetch(worker_id)[:id], store.fetch(worker_id)[:id]]
         expect(ids).to eq(ids.sort)
       end
+
+      it 'gives each fetched job its own unique claim_token' do
+        tokens = [store.fetch(worker_id)[:claim_token],
+                  store.fetch(worker_id)[:claim_token],
+                  store.fetch(worker_id)[:claim_token]]
+        expect(tokens.uniq.length).to eq(3)
+      end
+    end
+  end
+
+  describe '#mark_started!' do
+    let(:worker_id) { 1 }
+
+    it 'stamps started_at when called with the live lease' do
+      store.enqueue('Job', [], Time.now.to_f - 1)
+      job = store.fetch(worker_id)
+
+      before = Time.now.to_f
+      expect(store.mark_started!(job[:id], claim_token: job[:claim_token])).to be true
+      after = Time.now.to_f
+
+      started_at = db.execute("SELECT started_at FROM jobs WHERE id = ?", [job[:id]]).first[0]
+      expect(started_at).to be_between(before, after)
+    end
+
+    it 'is idempotent — second call leaves started_at unchanged and returns false' do
+      store.enqueue('Job', [], Time.now.to_f - 1)
+      job = store.fetch(worker_id)
+
+      store.mark_started!(job[:id], claim_token: job[:claim_token])
+      original = db.execute("SELECT started_at FROM jobs WHERE id = ?", [job[:id]]).first[0]
+
+      sleep 0.01
+      expect(store.mark_started!(job[:id], claim_token: job[:claim_token])).to be false
+      current = db.execute("SELECT started_at FROM jobs WHERE id = ?", [job[:id]]).first[0]
+
+      expect(current).to eq(original)
+    end
+
+    it 'returns false for a stale claim_token' do
+      store.enqueue('Job', [], Time.now.to_f - 1)
+      job = store.fetch(worker_id)
+
+      expect(store.mark_started!(job[:id], claim_token: 'wrong-token')).to be false
     end
   end
 
   describe '#complete' do
     let(:worker_id) { 1 }
 
-    it 'marks job as done' do
+    it 'marks job as done and records finished_at + duration_ms' do
       job_id = store.enqueue('TestJob', [], Time.now.to_f - 1)
-      store.fetch(worker_id)
+      job = store.fetch(worker_id)
 
-      store.complete(job_id)
+      result = store.complete(job_id, claim_token: job[:claim_token], duration_ms: 123)
+      expect(result).to be true
 
-      row = db.execute("SELECT status, locked_by, locked_at FROM jobs WHERE id = ?", [job_id]).first
+      row = db.execute("SELECT status, locked_by, locked_at, finished_at, duration_ms FROM jobs WHERE id = ?", [job_id]).first
       expect(row[0]).to eq('done')
       expect(row[1]).to be_nil
       expect(row[2]).to be_nil
+      expect(row[3]).to be_a(Float)
+      expect(row[4]).to eq(123)
+    end
+
+    it 'returns false for a stale claim_token and does not mutate the row' do
+      job_id = store.enqueue('TestJob', [], Time.now.to_f - 1)
+      store.fetch(worker_id)
+
+      expect(store.complete(job_id, claim_token: 'wrong')).to be false
+
+      status = db.execute("SELECT status FROM jobs WHERE id = ?", [job_id]).first[0]
+      expect(status).to eq('running')
     end
 
     it 'is a no-op for non-existent job' do
-      expect { store.complete(99_999) }.not_to raise_error
+      expect { store.complete(99_999, claim_token: 'any') }.not_to raise_error
+      expect(store.complete(99_999, claim_token: 'any')).to be false
+    end
+
+    it 'protects against the overlap-restart race (stale worker cannot close re-claimed row)' do
+      job_id = store.enqueue('Job', [], Time.now.to_f - 1)
+      old = store.fetch(worker_id)
+      store.recover(worker_id)
+      db.execute("UPDATE jobs SET run_at = ? WHERE id = ?", [Time.now.to_f - 5, job_id])
+      fresh = store.fetch(worker_id)
+      expect(fresh[:claim_token]).not_to eq(old[:claim_token])
+      expect(store.complete(job_id, claim_token: old[:claim_token], duration_ms: 1)).to be false
+
+      row = db.execute("SELECT status, claim_token FROM jobs WHERE id = ?", [job_id]).first
+      expect(row[0]).to eq('running')
+      expect(row[1]).to eq(fresh[:claim_token])
+
+      expect(store.complete(job_id, claim_token: fresh[:claim_token], duration_ms: 2)).to be true
     end
   end
 
   describe '#fail' do
     let(:worker_id) { 1 }
 
-    it 'marks job as failed' do
+    it 'marks job as failed and records error fields' do
       job_id = store.enqueue('TestJob', [], Time.now.to_f - 1)
-      store.fetch(worker_id)
+      job = store.fetch(worker_id)
 
-      store.fail(job_id)
+      result = store.fail(
+        job_id,
+        claim_token: job[:claim_token],
+        error_class: RuntimeError,
+        error_message: 'database down'
+      )
+      expect(result).to be true
 
-      row = db.execute("SELECT status, locked_by, locked_at FROM jobs WHERE id = ?", [job_id]).first
+      row = db.execute(
+        "SELECT status, locked_by, locked_at, last_error_class, last_error_message, finished_at " \
+        "FROM jobs WHERE id = ?", [job_id]
+      ).first
       expect(row[0]).to eq('failed')
       expect(row[1]).to be_nil
       expect(row[2]).to be_nil
+      expect(row[3]).to eq('RuntimeError')
+      expect(row[4]).to eq('database down')
+      expect(row[5]).to be_a(Float)
+    end
+
+    it 'returns false for a stale claim_token' do
+      job_id = store.enqueue('TestJob', [], Time.now.to_f - 1)
+      store.fetch(worker_id)
+      expect(store.fail(job_id, claim_token: 'wrong', error_class: RuntimeError, error_message: 'x')).to be false
+
+      status = db.execute("SELECT status FROM jobs WHERE id = ?", [job_id]).first[0]
+      expect(status).to eq('running')
+    end
+
+    it 'truncates oversized error messages' do
+      job_id = store.enqueue('TestJob', [], Time.now.to_f - 1)
+      job = store.fetch(worker_id)
+
+      big = 'x' * 10_000
+      store.fail(job_id, claim_token: job[:claim_token], error_class: StandardError, error_message: big)
+
+      stored = db.execute("SELECT last_error_message FROM jobs WHERE id = ?", [job_id]).first[0]
+      expect(stored.length).to be <= Async::Background::Queue::Store::ERROR_MESSAGE_MAX_LEN
     end
 
     it 'is a no-op for non-existent job' do
-      expect { store.fail(99_999) }.not_to raise_error
+      expect {
+        store.fail(99_999, claim_token: 'any', error_class: StandardError, error_message: 'x')
+      }.not_to raise_error
     end
 
     it 'leaves other jobs untouched' do
       id_a = store.enqueue('JobA', [], Time.now.to_f - 1)
       id_b = store.enqueue('JobB', [], Time.now.to_f - 1)
-      store.fetch(worker_id)
+      a = store.fetch(worker_id)
       store.fetch(worker_id)
 
-      store.fail(id_a)
+      store.fail(id_a, claim_token: a[:claim_token], error_class: RuntimeError, error_message: 'oops')
 
       status_a = db.execute("SELECT status FROM jobs WHERE id = ?", [id_a]).first[0]
       status_b = db.execute("SELECT status FROM jobs WHERE id = ?", [id_b]).first[0]
@@ -315,26 +457,49 @@ RSpec.describe Async::Background::Queue::Store, type: :unit do
 
     it 'reschedules the job while retries remain and stores attempt inside options' do
       job_id = store.enqueue('RetryJob', [], Time.now.to_f - 1, options: retry_options.to_h.compact)
-      store.fetch(worker_id)
+      job = store.fetch(worker_id)
 
-      expect(store.retry_or_fail(job_id, fallback_options: retry_options)).to eq(:retried)
+      result = store.retry_or_fail(
+        job_id,
+        claim_token: job[:claim_token],
+        error_class: StandardError,
+        error_message: 'transient',
+        fallback_options: retry_options
+      )
+      expect(result).to eq(:retried)
 
-      row = db.execute("SELECT status, locked_by, locked_at, options, run_at FROM jobs WHERE id = ?", [job_id]).first
+      row = db.execute(
+        "SELECT status, locked_by, locked_at, options, run_at, claim_token, last_error_class, last_error_message " \
+        "FROM jobs WHERE id = ?", [job_id]
+      ).first
       expect(row[0]).to eq('pending')
       expect(row[1]).to be_nil
       expect(row[2]).to be_nil
       expect(JSON.parse(row[3])).to include('attempt' => 1, 'retry' => 2, 'retry_delay' => 5.0, 'backoff' => 'linear')
       expect(row[4]).to be > Time.now.to_f
+      expect(row[5]).to be_nil
+      expect(row[6]).to eq('StandardError')
+      expect(row[7]).to eq('transient')
     end
 
     it 'increments the stored attempt across retries without extra columns' do
       job_id = store.enqueue('RetryJob', [], Time.now.to_f - 1, options: retry_options.to_h.compact)
       job = store.fetch(worker_id)
-      store.retry_or_fail(job_id, fallback_options: Async::Background::Job::Options.new(**job[:options]))
+      store.retry_or_fail(
+        job_id,
+        claim_token: job[:claim_token],
+        error_class: StandardError, error_message: 'r1',
+        fallback_options: Async::Background::Job::Options.new(**job[:options])
+      )
       db.execute("UPDATE jobs SET run_at = ? WHERE id = ?", [Time.now.to_f - 1, job_id])
 
       job = store.fetch(worker_id)
-      store.retry_or_fail(job_id, fallback_options: Async::Background::Job::Options.new(**job[:options]))
+      store.retry_or_fail(
+        job_id,
+        claim_token: job[:claim_token],
+        error_class: StandardError, error_message: 'r2',
+        fallback_options: Async::Background::Job::Options.new(**job[:options])
+      )
 
       row = db.execute("SELECT options FROM jobs WHERE id = ?", [job_id]).first
       expect(JSON.parse(row[0])).to include('attempt' => 2)
@@ -342,16 +507,18 @@ RSpec.describe Async::Background::Queue::Store, type: :unit do
 
     it 'marks the job as failed after retry exhaustion' do
       job_id = store.enqueue('RetryJob', [], Time.now.to_f - 1, options: retry_options.to_h.compact)
-      job = store.fetch(worker_id)
-      store.retry_or_fail(job_id, fallback_options: Async::Background::Job::Options.new(**job[:options]))
-      db.execute("UPDATE jobs SET run_at = ? WHERE id = ?", [Time.now.to_f - 1, job_id])
 
-      job = store.fetch(worker_id)
-      store.retry_or_fail(job_id, fallback_options: Async::Background::Job::Options.new(**job[:options]))
-      db.execute("UPDATE jobs SET run_at = ? WHERE id = ?", [Time.now.to_f - 1, job_id])
+      3.times do |i|
+        job = store.fetch(worker_id)
+        store.retry_or_fail(
+          job_id,
+          claim_token: job[:claim_token],
+          error_class: StandardError, error_message: "attempt #{i + 1}",
+          fallback_options: Async::Background::Job::Options.new(**job[:options])
+        )
 
-      job = store.fetch(worker_id)
-      expect(store.retry_or_fail(job_id, fallback_options: Async::Background::Job::Options.new(**job[:options]))).to eq(:failed)
+        db.execute("UPDATE jobs SET run_at = ? WHERE id = ?", [Time.now.to_f - 1, job_id])
+      end
 
       row = db.execute("SELECT status, options FROM jobs WHERE id = ?", [job_id]).first
       expect(row[0]).to eq('failed')
@@ -360,21 +527,49 @@ RSpec.describe Async::Background::Queue::Store, type: :unit do
 
     it 'falls back to fail when retries are disabled' do
       job_id = store.enqueue('NoRetryJob', [], Time.now.to_f - 1)
-      store.fetch(worker_id)
+      job = store.fetch(worker_id)
 
-      expect(store.retry_or_fail(job_id, fallback_options: Async::Background::Job::Options.new)).to eq(:failed)
+      result = store.retry_or_fail(
+        job_id,
+        claim_token: job[:claim_token],
+        error_class: StandardError, error_message: 'x',
+        fallback_options: Async::Background::Job::Options.new
+      )
+      expect(result).to eq(:failed)
 
       row = db.execute("SELECT status FROM jobs WHERE id = ?", [job_id]).first
       expect(row[0]).to eq('failed')
     end
 
-    it 'uses the stored retry policy as the source of truth' do
+    it 'returns nil and does not mutate state on stale lease' do
       job_id = store.enqueue('RetryJob', [], Time.now.to_f - 1, options: retry_options.to_h.compact)
       store.fetch(worker_id)
 
+      result = store.retry_or_fail(
+        job_id,
+        claim_token: 'wrong-token',
+        error_class: StandardError, error_message: 'x',
+        fallback_options: retry_options
+      )
+      expect(result).to be_nil
+
+      status = db.execute("SELECT status FROM jobs WHERE id = ?", [job_id]).first[0]
+      expect(status).to eq('running')
+    end
+
+    it 'uses the stored retry policy as the source of truth' do
+      job_id = store.enqueue('RetryJob', [], Time.now.to_f - 1, options: retry_options.to_h.compact)
+      job = store.fetch(worker_id)
+
       conflicting_options = Async::Background::Job::Options.new(retry: 0, retry_delay: 99)
 
-      expect(store.retry_or_fail(job_id, fallback_options: conflicting_options)).to eq(:retried)
+      result = store.retry_or_fail(
+        job_id,
+        claim_token: job[:claim_token],
+        error_class: StandardError, error_message: 'x',
+        fallback_options: conflicting_options
+      )
+      expect(result).to eq(:retried)
 
       row = db.execute("SELECT status, options FROM jobs WHERE id = ?", [job_id]).first
       expect(row[0]).to eq('pending')
@@ -385,17 +580,23 @@ RSpec.describe Async::Background::Queue::Store, type: :unit do
   describe '#recover' do
     let(:worker_id) { 1 }
 
-    it 'requeues running jobs locked by the given worker' do
+    it 'requeues running jobs locked by the given worker and clears claim_token + started_at' do
       job_id = store.enqueue('StaleJob', [], Time.now.to_f - 1)
-      store.fetch(worker_id) # lock it
+      job = store.fetch(worker_id) # lock it
+      store.mark_started!(job[:id], claim_token: job[:claim_token])
 
       recovered = store.recover(worker_id)
 
       expect(recovered).to eq(1)
-      row = db.execute("SELECT status, locked_by, locked_at FROM jobs WHERE id = ?", [job_id]).first
+      row = db.execute(
+        "SELECT status, locked_by, locked_at, claim_token, started_at FROM jobs WHERE id = ?",
+        [job_id]
+      ).first
       expect(row[0]).to eq('pending')
       expect(row[1]).to be_nil
       expect(row[2]).to be_nil
+      expect(row[3]).to be_nil
+      expect(row[4]).to be_nil
     end
 
     it 'does not touch jobs locked by other workers' do
@@ -412,6 +613,120 @@ RSpec.describe Async::Background::Queue::Store, type: :unit do
 
     it 'returns 0 when there is nothing to recover' do
       expect(store.recover(worker_id)).to eq(0)
+    end
+  end
+
+  describe '#next_pending_run_at' do
+    it 'returns nil for an empty queue' do
+      expect(store.next_pending_run_at).to be_nil
+    end
+
+    it 'returns the smallest pending run_at across all rows' do
+      store.enqueue('J1', [], Time.now.to_f + 10)
+      store.enqueue('J2', [], Time.now.to_f + 5)
+      store.enqueue('J3', [], Time.now.to_f + 20)
+
+      expect(store.next_pending_run_at).to be_within(0.1).of(Time.now.to_f + 5)
+    end
+
+    it 'ignores running, done, and failed rows' do
+      store.enqueue('Done',    [], Time.now.to_f - 5)
+      store.enqueue('Failed',  [], Time.now.to_f - 5)
+      store.enqueue('Running', [], Time.now.to_f - 5)
+      store.enqueue('Pending', [], Time.now.to_f + 100)
+
+      done    = store.fetch(1)
+      failed  = store.fetch(1)
+      running = store.fetch(1)
+
+      store.complete(done[:id], claim_token: done[:claim_token])
+      store.fail(failed[:id], claim_token: failed[:claim_token], error_class: StandardError, error_message: 'x')
+      _ = running
+
+      expect(store.next_pending_run_at).to be_within(0.1).of(Time.now.to_f + 100)
+    end
+  end
+
+  describe '#data_version' do
+    it 'changes when another connection writes' do
+      store.enqueue('Probe', [])
+      v1 = store.data_version
+
+      other = described_class.new(path: db_path)
+      other.ensure_database!
+      other.enqueue('FromOther', [])
+      other.close
+
+      v2 = store.data_version
+      expect(v2).not_to eq(v1)
+    end
+  end
+
+  describe 'cleanup retention' do
+    before do
+      store.instance_variable_set(
+        :@last_cleanup_at,
+        store.send(:monotonic_now) - Async::Background::Queue::Store::CLEANUP_INTERVAL - 1
+      )
+    end
+
+    def force_cleanup_window!
+      store.instance_variable_set(
+        :@last_cleanup_at,
+        store.send(:monotonic_now) - Async::Background::Queue::Store::CLEANUP_INTERVAL - 1
+      )
+    end
+
+    it 'deletes done rows by finished_at, not created_at' do
+      fresh_id = store.enqueue('Fresh', [], Time.now.to_f - 99_999)
+      fresh = store.fetch(1)
+      store.complete(fresh[:id], claim_token: fresh[:claim_token])
+
+      old_id = store.enqueue('Old', [], Time.now.to_f - 99_999)
+      old = store.fetch(1)
+      store.complete(old[:id], claim_token: old[:claim_token])
+      db.execute("UPDATE jobs SET finished_at = ? WHERE id = ?",
+                 [Time.now.to_f - Async::Background::Queue::Store::CLEANUP_AGE - 1, old_id])
+
+      force_cleanup_window!
+
+      store.enqueue('Trigger', [], Time.now.to_f - 1)
+      store.fetch(1)
+
+      ids = db.execute("SELECT id FROM jobs ORDER BY id").map { |r| r[0] }
+      expect(ids).to include(fresh_id)
+      expect(ids).not_to include(old_id)
+    end
+
+    it 'retains failed jobs longer than done jobs (FAILED_RETENTION_AGE)' do
+      failed_id = store.enqueue('FailedKept', [], Time.now.to_f - 1)
+      job = store.fetch(1)
+      store.fail(job[:id], claim_token: job[:claim_token], error_class: StandardError, error_message: 'x')
+      db.execute("UPDATE jobs SET finished_at = ? WHERE id = ?",
+                 [Time.now.to_f - Async::Background::Queue::Store::CLEANUP_AGE - 1, failed_id])
+
+      force_cleanup_window!
+      store.enqueue('Trigger', [], Time.now.to_f - 1)
+      store.fetch(1)
+
+      status = db.execute("SELECT status FROM jobs WHERE id = ?", [failed_id]).first
+      expect(status).not_to be_nil
+      expect(status[0]).to eq('failed')
+    end
+
+    it 'eventually purges failed jobs older than FAILED_RETENTION_AGE' do
+      failed_id = store.enqueue('FailedExpired', [], Time.now.to_f - 1)
+      job = store.fetch(1)
+      store.fail(job[:id], claim_token: job[:claim_token], error_class: StandardError, error_message: 'x')
+      db.execute("UPDATE jobs SET finished_at = ? WHERE id = ?",
+                 [Time.now.to_f - Async::Background::Queue::Store::FAILED_RETENTION_AGE - 1, failed_id])
+
+      force_cleanup_window!
+      store.enqueue('Trigger', [], Time.now.to_f - 1)
+      store.fetch(1)
+
+      row = db.execute("SELECT id FROM jobs WHERE id = ?", [failed_id]).first
+      expect(row).to be_nil
     end
   end
 
