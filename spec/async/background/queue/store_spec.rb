@@ -107,7 +107,8 @@ RSpec.describe Async::Background::Queue::Store, type: :unit do
         'idx_jobs_pending',
         'idx_jobs_done_finished_at',
         'idx_jobs_failed_finished_at',
-        'idx_jobs_running'
+        'idx_jobs_executing_started_at',
+        'idx_jobs_claimed_locked_at'
       )
     end
   end

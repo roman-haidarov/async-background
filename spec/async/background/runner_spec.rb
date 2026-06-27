@@ -2,6 +2,7 @@
 
 require 'spec_helper'
 require 'yaml'
+require 'tmpdir'
 
 RSpec.describe Async::Background::Runner, type: :unit do
   before(:all) do
@@ -53,6 +54,45 @@ RSpec.describe Async::Background::Runner, type: :unit do
   end
 
   let(:runner) { build_runner }
+
+  describe 'queue-only initialization' do
+    it 'accepts config_path: nil when a queue listener is configured' do
+      socket_dir = Dir.mktmpdir('async-background-runner')
+      queue_path = temp_db_path
+      metrics_path = temp_file_path('.shm')
+      queue_only_runner = nil
+
+      expect {
+        queue_only_runner = described_class.new(
+          config_path: nil,
+          job_count: 1,
+          worker_index: 1,
+          total_workers: 1,
+          queue_db_path: queue_path,
+          queue_socket_dir: socket_dir,
+          metrics_shm_path: metrics_path
+        )
+      }.not_to raise_error
+
+      expect(queue_only_runner.heap).to be_empty
+      expect(queue_only_runner.queue_store).to be_a(Async::Background::Queue::Store)
+    ensure
+      queue_only_runner&.queue_store&.close
+      queue_only_runner&.instance_variable_get(:@queue_waker)&.close
+      FileUtils.rm_rf(socket_dir) if socket_dir
+    end
+
+    it 'rejects an empty runner with neither a schedule nor a queue listener' do
+      expect {
+        described_class.new(
+          config_path: nil,
+          job_count: 1,
+          worker_index: 1,
+          total_workers: 1
+        )
+      }.to raise_error(Async::Background::ConfigError, /config_path or queue_socket_dir/)
+    end
+  end
 
   describe '#resolve_job_class (private)' do
     it 'resolves a top-level Job class by name' do

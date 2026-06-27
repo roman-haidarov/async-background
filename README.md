@@ -12,7 +12,7 @@ A lightweight cron, interval, and job-queue scheduler for Ruby's [Async](https:/
 
 - Ruby >= 3.3
 - `async ~> 2.0`, `fugit ~> 1.0`
-- `sqlite3 ~> 2.0` (optional, for the job queue)
+- `sqlite3 ~> 2.0` (optional, storage)
 - `async-utilization >= 0.3, < 0.5` (optional, for metrics)
 
 ## Install
@@ -20,7 +20,7 @@ A lightweight cron, interval, and job-queue scheduler for Ruby's [Async](https:/
 ```ruby
 # Gemfile
 gem "async-background"
-gem "sqlite3", "~> 2.0"            # optional
+gem "sqlite3", "~> 2.0"  # optional
 gem "async-utilization", ">= 0.3", "< 0.5"  # optional
 ```
 
@@ -126,6 +126,12 @@ The dynamic queue runs alongside it:
 
 Jobs are persisted in SQLite, so a missed wake-up is never a lost job — workers also poll every 5 seconds as a safety net.
 
+### Queue-only workers
+
+Recurring schedules are optional. A worker that serves only dynamic jobs starts with
+`config_path: nil` and a `queue_socket_dir`; it does not need a placeholder schedule file.
+A supplied schedule path stays strict and raises when the file is missing or empty.
+
 ### Schema migration during deploy
 
 Run queue migrations once in the release/pre-deploy step, before starting new web or worker
@@ -140,18 +146,18 @@ A fresh database still self-initializes on first use for local development, but 
 migration is the production path. For an existing queue, finish or stop 0.7.1 producers/workers,
 run the migration once, then start 0.7.2 processes.
 
-### Future dashboard indexes
+### Dashboard indexes
 
 The queue does **not** install dashboard indexes by default. They slow every enqueue even though
-pending rows never enter terminal or in-flight read-model indexes. When the 1.0 dashboard module
-is enabled, its installer will run this once in the same release step:
+pending rows never enter terminal or in-flight read-model indexes. Enable them once before
+mounting the dashboard:
 
 ```ruby
 Async::Background::Queue.prepare_dashboard!(path: ENV.fetch("QUEUE_DB_PATH"))
 ```
 
-It adds three compact indexes: one each for cursor-sorted done and failed jobs, plus one for
-the bounded in-flight list. It does not change queue behavior or rerun the core migration.
+It adds four compact indexes: cursor-sorted `done` / `failed` history plus separate
+`executing` / `claimed` in-flight lists. It does not change queue behavior or rerun the core migration.
 
 ## Metrics
 

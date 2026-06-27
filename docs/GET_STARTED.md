@@ -172,8 +172,8 @@ Async::Background::Queue.migrate!(path: ENV.fetch("QUEUE_DB_PATH"))
 ```
 
 For an existing queue, stop or drain 0.7.1 processes first, run the migration, then start 0.7.2.
-The base queue keeps only its pending-job index. A future dashboard installer can later call
-`Async::Background::Queue.prepare_dashboard!(path: DB_PATH)` once to add its three read-model
+The base queue keeps only its pending-job index. Before mounting the dashboard, call
+`Async::Background::Queue.prepare_dashboard!(path: DB_PATH)` once to add its four read-model
 indexes without slowing normal enqueue-only deployments.
 
 That's the full config — both web and scheduler share the same SQLite file and notify each other through Unix domain sockets. Web controllers can now enqueue:
@@ -189,6 +189,25 @@ end
 ```
 
 > **How wake-up works.** When any process (web or scheduler) enqueues a job, `SocketNotifier` sends one byte to a Unix domain socket. The chosen background worker wakes in ~30–80 µs and reads from SQLite — no polling delay.
+
+### Queue-only worker
+
+A recurring schedule is optional. For applications that use only `perform_async`,
+`perform_in`, and `perform_at`, pass `config_path: nil`. The worker keeps listening
+to the queue until it receives `SIGTERM` / `SIGINT`; no placeholder YAML file is needed.
+
+```ruby
+Async::Background::Runner.new(
+  config_path: nil,
+  worker_index: 1,
+  total_workers: 1,
+  queue_db_path: Rails.root.join("storage/async-background.sqlite3").to_s,
+  queue_socket_dir: "/tmp"
+).run
+```
+
+A non-`nil` `config_path` remains strict: a missing or empty schedule file raises
+`Async::Background::ConfigError` rather than silently disabling recurring jobs.
 
 ### Environment variables
 
@@ -216,6 +235,128 @@ The queue and scheduler do not depend on it. With the gem absent, `runner.metric
 is `false` and `Async::Background::Metrics.read_all(...)` returns `[]`. When web and
 background run in separate containers, point `ASYNC_BACKGROUND_METRICS_PATH` at a file under
 a shared volume (for example `/app/tmp/queue/async-background.shm`).
+
+---
+
+## Step 2.5 — Mount the optional dashboard
+
+The dashboard is a separate, read-only Rack app over the same SQLite file. It never enqueues,
+retries, deletes, or otherwise mutates jobs. Before mounting it, add its read-model indexes once
+in the same release step as the queue migration:
+
+```ruby
+# bin/migrate_async_background
+require "async/background/queue/client"
+
+queue_path = ENV.fetch("QUEUE_DB_PATH")
+Async::Background::Queue.migrate!(path: queue_path)
+Async::Background::Queue.prepare_dashboard!(path: queue_path)
+```
+
+`prepare_dashboard!` is idempotent. It installs four dashboard-only indexes for done, failed,
+claimed, and executing lists; the core pending index already exists. Normal queue-only deployments
+do not pay their write cost.
+
+### Rack / Falcon
+
+Put this in the Rack app that serves the dashboard (for example, a dedicated `config.ru`):
+
+```ruby
+# frozen_string_literal: true
+
+require "async/background/web"
+
+Async::Background::Web.configure do |config|
+  config.queue_path = ENV.fetch("QUEUE_DB_PATH", "/var/lib/app/queue.db")
+  config.auth = ->(env) { env["warden"]&.user&.admin? }
+
+  # Optional: requires async-utilization and a shared path visible to workers.
+  config.metrics_path = ENV["ASYNC_BACKGROUND_METRICS_PATH"]
+  config.total_workers = ENV.fetch("BACKGROUND_FORKS", 1).to_i
+
+  # Must match the Rack/Rails mount point below.
+  config.mount_path = "/admin/background"
+
+  # Default transport. One SSE connection per open tab; no browser polling.
+  config.transport = :sse
+  config.stream_poll_seconds = 0.5       # one SQLite change check per Rack process
+  config.stream_heartbeat_seconds = 25.0 # keeps proxies from idling out the stream
+  config.stream_retry_ms = 5_000
+end
+
+run Async::Background::Web.app
+```
+
+Add `rack` to the application bundle when it is not already present:
+
+```ruby
+gem "rack", "~> 3.0"
+```
+
+When metrics are not needed, omit both `metrics_path` and `total_workers`.
+
+### Rails
+
+Configure the dashboard once during boot:
+
+```ruby
+# config/initializers/async_background_dashboard.rb
+require "async/background/web"
+
+Async::Background::Web.configure do |config|
+  config.queue_path = ENV.fetch("QUEUE_DB_PATH", Rails.root.join("tmp/queue/background.db").to_s)
+  config.auth = ->(env) { env["warden"]&.user&.admin? }
+  config.metrics_path = ENV["ASYNC_BACKGROUND_METRICS_PATH"]
+  config.total_workers = ENV.fetch("BACKGROUND_FORKS", 1).to_i
+  config.mount_path = "/admin/background"
+  config.transport = :sse
+end
+```
+
+Then mount the Rack app:
+
+```ruby
+# config/routes.rb
+mount Async::Background::Web.app => "/admin/background"
+```
+
+Use an application-specific authorization predicate. The gem intentionally has no permissive
+default: a missing or falsey `auth` result returns `401`. Do not expose the dashboard publicly
+without an authentication layer in front of it.
+
+### Live updates and rate limits
+
+SSE is the default transport. A dashboard tab opens one authenticated `GET /api/stream` request;
+the server sends a complete overview snapshot after connect and after the queue changes. The browser
+performs ordinary JSON requests only for the initial page and when it needs to redraw the *active*
+list. It does **not** poll on a timer.
+
+Internally, each Rack process with at least one connected dashboard uses one long-lived SQLite read
+connection and compares `PRAGMA data_version` every `stream_poll_seconds` (default `0.5`). This is a
+single local database read per process, not per browser tab. SQLite documents `data_version` for
+exactly this interactive-cache invalidation use case. The stream ships a heartbeat every 25 seconds,
+uses a server-supplied 5-second reconnect delay, and each reconnect begins from a full current
+snapshot; no event log or Redis is required.
+
+When the host application applies a generic Rack::Attack throttle to all `/admin` requests, exempt
+**authenticated** dashboard reads or put the dashboard behind a separate admin throttle. Do not let
+a long-lived stream and its initial list request count as abuse:
+
+```ruby
+# config/initializers/rack_attack.rb
+Rack::Attack.safelist("authenticated async-background dashboard") do |request|
+  request.path.start_with?("/admin/background") &&
+    request.env["warden"]&.user(:admin_user).present?
+end
+```
+
+The dashboard's own `config.auth` still runs for every request; this only prevents a generic rate
+limit from treating an authenticated operator's live dashboard as a burst. Adapt the Warden scope to
+your application. If the reverse proxy buffers streaming responses, disable buffering for
+`/admin/background/api/stream`; the response already includes `X-Accel-Buffering: no` for nginx.
+
+Use `config.transport = :polling` only for a server that cannot keep an SSE response open. It is a
+compatibility fallback, not the recommended production mode.
 
 &nbsp;
 

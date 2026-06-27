@@ -1,5 +1,112 @@
 # Changelog
 
+## Unreleased
+
+### Dashboard SSE hardening
+
+- Make SSE the default dashboard transport. `:polling` remains an explicit compatibility fallback.
+- Replace one `PRAGMA data_version` loop **per browser connection** with one shared `EventHub` watcher per Rack app process while at least one dashboard tab is connected. It fans complete overview snapshots to every SSE body through latest-value mailboxes, so slow tabs do not accumulate unbounded event queues.
+- Use complete snapshots on connect and after a change rather than a replay log: reconnecting EventSource clients cannot miss the current queue state.
+- Coalesce client-side list refreshes after a burst of changes, cancel stale list fetches on tab switches, and retain previous pages when `Load more` is used.
+- Add SSE retry control, 25-second heartbeat frames, `no-cache, no-transform`, and `X-Accel-Buffering: no`. Remove the hop-by-hop `Connection` response header.
+- Fingerprint asset URLs and cache immutable assets by digest, so a dashboard deploy cannot leave a browser on incompatible HTML/JS/CSS.
+- Add coverage for event fan-out, latest-value coalescing, clean stream shutdown, forced overview reads, and the SSE configuration constraints.
+
+## 1.1.0
+
+Server-Sent Events transport for the dashboard. Replaces HTTP polling as the recommended transport.
+
+### Added
+
+- **SSE transport for the dashboard.** Set `c.transport = :sse` in `Async::Background::Web.configure` and the dashboard now uses a single long-lived `text/event-stream` connection per browser tab instead of polling `/api/overview` every 2 seconds. The browser opens `EventSource(mount_path + '/api/stream')` once; the server pushes an `overview` event whenever `PRAGMA data_version` changes, and a `:keepalive` comment frame every 30 seconds. Result: 1 HTTP connection per dashboard tab regardless of how long it stays open, instead of 30 req/min per tab.
+
+  - New module `Async::Background::Web::Stream` implements the event loop as a Rack streaming body (responds to `#each`, yields SSE frames). Holds no state across requests.
+  - New route `GET /api/stream` returns `200 text/event-stream` when `transport == :sse`, `404` otherwise. Subject to the same auth gate as every other endpoint.
+  - New `Response.sse(body)` helper sets the correct headers including `x-accel-buffering: no` (disables nginx buffering for the streaming response).
+  - JS client (`assets.rb`) detects `state.config.transport === 'sse'` at boot and chooses `EventSource` over `setInterval(tick, ...)`. Both transports share the same `applyOverview()` and `refreshActiveList()` handlers, so the UI behaves identically.
+
+- **`Configuration#transport`** with default `:polling` (backward compatible) and accepted values `:polling | :sse`. Validation rejects anything else with `ConfigurationError`. The chosen transport is exposed at `/api/config` so the client knows which path to take.
+
+### Migration
+
+Existing deployments keep working unchanged. To opt into SSE:
+
+```ruby
+Async::Background::Web.configure do |c|
+  c.queue_path = ...
+  c.auth = ->(env) { ... }
+  c.transport = :sse
+end
+```
+
+### Server compatibility note
+
+SSE holds the request thread/fiber open for the lifetime of the dashboard tab. **Recommended for Falcon**, which handles long-lived connections natively via fibers. **Puma works** but each open dashboard tab holds one worker thread for its lifetime — fine for an admin dashboard with a handful of operators, problematic if many concurrent operators would starve the worker pool. **Unicorn does not work** for SSE since its blocking worker model can't hold long-lived connections without timeouts; stay on `:polling` there.
+
+### Backend-side polling
+
+The server still polls `PRAGMA data_version` every 500ms inside the snapshot connection to detect changes. This is a connection-local PRAGMA call, microseconds, never hits a rate limiter. Client-facing transport is push.
+
+### Tests
+
+- New `spec/async/background/web/stream_spec.rb` — covers overview event on data_version change, heartbeat after idle, graceful exit on `EPIPE`/`IOError`, error frame on `ClosedError`/`UnavailableError`.
+- Extended `spec/async/background/web/app_spec.rb` — `/api/stream` returns 404 on polling default, 200 text/event-stream on `:sse`, 401 without auth.
+- Extended `spec/async/background/web/configuration_spec.rb` — accepts `:sse`, rejects unknown transports.
+
+## 1.0.0
+
+First stable release. The queue execution contract from 0.7.2 (claim-token CAS, lifecycle columns, barrier-based shutdown drain, per-status partial indexes, versioned migrations) is now considered the public API.
+
+### Features
+
+- **Web dashboard.** Rack-mountable read-only UI under `require 'async/background/web'`. Vanilla HTML/CSS/JS, no JS framework, no npm.
+  - Endpoints: `GET /`, `GET /assets/app.css`, `GET /assets/app.js`, `GET /api/overview`, `GET /api/executing`, `GET /api/claimed`, `GET /api/pending`, `GET /api/done`, `GET /api/failed`, `GET /api/metrics`, `GET /api/config`.
+  - Default transport is JSON polling (`poll_interval_ms`, default 2000). SSE adapter for Falcon is intentionally deferred to a later release; the dashboard already coalesces work via a shared overview cache, so adding SSE later is a backward-compatible change.
+  - Read path runs through `Async::Background::Web::Snapshot`, which opens SQLite with `file:?mode=ro`, wraps a `Mutex` around a single shared connection, and uses one read transaction per endpoint and caches each overview as one consistent snapshot.
+  - Distinguishes `Executing` (`status='running' AND started_at IS NOT NULL`) from `Claimed` (`status='running' AND started_at IS NULL`).
+  - Overview snapshot cache for `counts_cache_ttl` seconds (default 3.0) so a busy queue does not turn the dashboard into a hot reader.
+  - Cursor pagination for `done`/`failed`/`pending` using `(finished_at, id)` / `(run_at, id)` tuples. Stable on ties.
+  - Args hidden by default (`expose_args: false`); when enabled, content runs through `redact_args`. All user content rendered through `textContent`, never `innerHTML`.
+  - Auth hook is **mandatory**. `Configuration#validate!` rejects an unconfigured `auth`. There is no permissive default.
+
+  - Add the optional Rack dashboard for the SQLite queue.
+  - Make sqlite3 an explicit runtime dependency for queue/dashboard installs.
+
+### Configuration
+
+```ruby
+require 'async/background/web'
+
+Async::Background::Queue::Store.prepare_dashboard!(path: '/var/lib/app/queue.db')
+
+Async::Background::Web.configure do |c|
+  c.queue_path        = '/var/lib/app/queue.db'
+  c.auth              = ->(env) { env['warden'].user&.admin? }
+  c.expose_args       = false
+  c.metrics_path      = '/run/app/async-background.shm'
+  c.total_workers     = 4
+  c.counts_cache_ttl  = 3.0
+  c.poll_interval_ms  = 2000
+  c.list_limit        = 50
+  c.mount_path        = '/admin/background'
+  c.title             = 'My App background jobs'
+end
+
+run Async::Background::Web.app
+```
+
+### Dependencies
+
+- `rack` is an optional dependency. Required only when `require 'async/background/web'` is loaded. Core gem and worker processes do not require it.
+
+### Breaking changes from 0.7.x
+
+None beyond what 0.7.2 already shipped. The 1.0 line locks the existing contract:
+
+- `Queue::Store#fetch` returns `claim_token` in the result hash.
+- All terminal `Queue::Store` methods (`complete`, `fail`, `retry_or_fail`) require the `claim_token:` kwarg and return CAS success boolean / `:retried` / `:failed` / `nil`.
+- Schema is versioned via `PRAGMA user_version`. Use `Queue::Store.migrate!(path:)` to upgrade. Use `Queue::Store.prepare_dashboard!(path:)` from the dashboard process to lazily create dashboard-only indexes (per-status partial indexes for `done` / `failed`, plus separate `executing` and `claimed` indexes).
+
 ## 0.7.2
 
 - Harden queue execution, retries, shutdown, and metrics.
@@ -102,7 +209,7 @@
   - Proper job distribution validation across worker pool
 - **Test fixtures** — dedicated `ci/fixtures/jobs.rb` and `ci/fixtures/schedule.yml` for scenario testing
 
-### Bug Fixes  
+### Bug Fixes
 - **SQLite busy timeout** — added `PRAGMA busy_timeout = 5000` to `Queue::Store` to prevent `SQLITE_BUSY` errors under concurrent multi-process database access
 - **Enhanced Queue::Notifier error handling** — restructured IO error handling with clearer categorization:
   - `WRITE_DROPPED` for write failures (`IO::WaitWritable`, `Errno::EAGAIN`, `IOError`, `Errno::EPIPE`) — all non-fatal as job is already in store

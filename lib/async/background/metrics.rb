@@ -191,10 +191,12 @@ module Async
 
       def ensure_shm!(total_workers, path)
         required_size = self.class.segment_size * total_workers
+        page_size = IO::Buffer::PAGE_SIZE
+        mapped_size = ((required_size + page_size - 1) / page_size) * page_size
 
         File.open(path, File::CREAT | File::RDWR, 0o644) do |file|
           file.flock(File::LOCK_EX)
-          file.truncate(required_size) if file.size < required_size
+          file.truncate(mapped_size) if file.size < mapped_size
         ensure
           file.flock(File::LOCK_UN) rescue nil
         end
