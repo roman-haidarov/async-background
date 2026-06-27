@@ -69,9 +69,14 @@ A single `falcon.rb` defines three things: the web server, the background schedu
 require "falcon/environment/rack"
 require "async/service/generic"
 
-TOTAL_BG  = ENV.fetch("BACKGROUND_FORKS", 0).to_i
-DB_PATH   = ENV.fetch("QUEUE_DB_PATH",     "/app/tmp/queue/background.db")
-SOCK_DIR  = ENV.fetch("QUEUE_SOCKET_DIR",  "/app/tmp/queue/sockets")
+TOTAL_BG     = ENV.fetch("BACKGROUND_FORKS", 0).to_i
+DB_PATH      = ENV.fetch("QUEUE_DB_PATH", "/app/tmp/queue/background.db")
+SOCK_DIR     = ENV.fetch("QUEUE_SOCKET_DIR", "/app/tmp/queue/sockets")
+METRICS_PATH = ENV.fetch("ASYNC_BACKGROUND_METRICS_PATH", "/app/tmp/queue/async-background.shm")
+
+# Run this once in the deployment release/pre-start phase, before this supervisor
+# starts web or scheduler processes. Keep it outside worker service setup.
+# Async::Background::Queue.migrate!(path: DB_PATH)
 
 # ── Web server (also enqueues into the queue) ──
 service "web" do
@@ -122,10 +127,6 @@ if TOTAL_BG > 0
           require "async/background/queue/client"
           require "async/background/queue/socket_notifier"
 
-          # Pre-fork: create schema once, then close.
-          # SQLite connections must NOT survive across fork().
-          Async::Background::Queue::Store.new(path: DB_PATH).tap(&:ensure_database!).close
-
           TOTAL_BG.times do |i|
             container.run(count: 1, restart: true) do |instance|
               require_relative "config/environment"
@@ -138,8 +139,9 @@ if TOTAL_BG > 0
                 job_count:        ENV.fetch("LIMIT_JOB_COUNT", 2).to_i,
                 worker_index:     i + 1,
                 total_workers:    TOTAL_BG,
-                queue_socket_dir: SOCK_DIR,
-                queue_db_path:    DB_PATH
+                queue_socket_dir:  SOCK_DIR,
+                queue_db_path:     DB_PATH,
+                metrics_shm_path:  METRICS_PATH
               )
 
               Async::Background::Queue.default_client = Async::Background::Queue::Client.new(
@@ -159,6 +161,20 @@ if TOTAL_BG > 0
   end
 end
 ```
+
+Before starting this Falcon supervisor in a production deploy, run the schema release step once:
+
+```ruby
+# bin/migrate_async_background
+require "async/background/queue/client"
+
+Async::Background::Queue.migrate!(path: ENV.fetch("QUEUE_DB_PATH"))
+```
+
+For an existing queue, stop or drain 0.7.1 processes first, run the migration, then start 0.7.2.
+The base queue keeps only its pending-job index. A future dashboard installer can later call
+`Async::Background::Queue.prepare_dashboard!(path: DB_PATH)` once to add its three read-model
+indexes without slowing normal enqueue-only deployments.
 
 That's the full config — both web and scheduler share the same SQLite file and notify each other through Unix domain sockets. Web controllers can now enqueue:
 
@@ -184,8 +200,22 @@ end
 | `QUEUE_DB_PATH` | `/app/tmp/queue/background.db` | SQLite database path |
 | `QUEUE_SOCKET_DIR` | `/app/tmp/queue/sockets` | Directory for cross-process wake-up sockets |
 | `ISOLATION_FORKS` | _(empty)_ | Comma-separated worker indices excluded from queue (e.g. `1,3`) |
+| `ASYNC_BACKGROUND_METRICS_PATH` | `/tmp/async-background.shm` | Optional metrics shared-memory file; mount a common path for workers and external observers |
 
 ---
+
+### Optional metrics
+
+Install `async-utilization` only in applications that need worker metrics:
+
+```ruby
+gem "async-utilization", ">= 0.3", "< 0.5"
+```
+
+The queue and scheduler do not depend on it. With the gem absent, `runner.metrics.enabled?`
+is `false` and `Async::Background::Metrics.read_all(...)` returns `[]`. When web and
+background run in separate containers, point `ASYNC_BACKGROUND_METRICS_PATH` at a file under
+a shared volume (for example `/app/tmp/queue/async-background.shm`).
 
 &nbsp;
 

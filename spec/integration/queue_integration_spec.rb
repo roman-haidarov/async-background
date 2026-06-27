@@ -52,7 +52,7 @@ RSpec.describe 'Queue Integration', type: :integration do
       expect(job[:class_name]).to eq('IntegrationTestJob')
       expect(job[:args]).to eq(['arg1', 'arg2'])
 
-      store.complete(job[:id])
+      store.complete(job[:id], claim_token: job[:claim_token])
 
       db = store.instance_variable_get(:@db)
       status = db.execute('SELECT status FROM jobs WHERE id = ?', [job[:id]]).first[0]
@@ -76,7 +76,7 @@ RSpec.describe 'Queue Integration', type: :integration do
       job = store.fetch(worker_id)
       expect(job[:id]).to eq(job_id)
 
-      store.fail(job_id)
+      store.fail(job_id, claim_token: job[:claim_token], error_class: RuntimeError, error_message: 'integration fail')
 
       db = store.instance_variable_get(:@db)
       status = db.execute('SELECT status FROM jobs WHERE id = ?', [job_id]).first[0]
@@ -113,7 +113,7 @@ RSpec.describe 'Queue Integration', type: :integration do
       expect(fetched_jobs.map { |j| j[:id] }.uniq.size).to eq(fetched_jobs.size)
       expect(fetched_jobs.size).to eq(workers.size)
 
-      fetched_jobs.each { |job| store.complete(job[:id]) }
+      fetched_jobs.each { |job| store.complete(job[:id], claim_token: job[:claim_token]) }
 
       db = store.instance_variable_get(:@db)
       completed_jobs = fetched_jobs.map do |job|
@@ -229,7 +229,13 @@ RSpec.describe 'Queue Integration', type: :integration do
       job_id = retrying_job_class.perform_async('retryable')
       job = store.fetch(1)
 
-      store.retry_or_fail(job_id, fallback_options: Async::Background::Job::Options.new(**job[:options]))
+      store.retry_or_fail(
+        job_id,
+        claim_token: job[:claim_token],
+        error_class: StandardError,
+        error_message: 'integration retry',
+        fallback_options: Async::Background::Job::Options.new(**job[:options])
+      )
 
       db = store.instance_variable_get(:@db)
       db.execute('UPDATE jobs SET run_at = ? WHERE id = ?', [Time.now.to_f - 1, job_id])

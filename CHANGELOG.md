@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.2
+
+- Harden queue execution, retries, shutdown, and metrics.
+- Add schema v1, optional dashboard indexes, and a faster enqueue path.
+
 ## 0.7.1
 
 ### Features

@@ -5,4 +5,4 @@ source 'https://rubygems.org'
 gemspec
 
 # Optional dependency for metrics - add this to enable metrics
-# gem "async-utilization", "~> 0.3"
+# gem "async-utilization", ">= 0.3", "< 0.5"

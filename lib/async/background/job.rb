@@ -4,6 +4,7 @@ module Async
   module Background
     module Job
       DEFAULT_TIMEOUT = 120
+      EMPTY_OPTIONS   = {}.freeze
       BACKOFFS        = %i[fixed linear exponential].freeze
       DEFAULT_JITTER_FOR = { fixed: 0.0, linear: 0.0, exponential: 0.5 }.freeze
 
@@ -55,15 +56,16 @@ module Async
       module ClassMethods
         def perform_now(*args) = new.perform(*args)
 
-        def perform_async(*args, options: {})     = Async::Background::Queue.enqueue(self, *args, options: options)
-        def perform_in(delay, *args, options: {}) = Async::Background::Queue.enqueue_in(delay, self, *args, options: options)
-        def perform_at(time, *args, options: {})  = Async::Background::Queue.enqueue_at(time, self, *args, options: options)
+        def perform_async(*args, options: EMPTY_OPTIONS)     = Async::Background::Queue.enqueue(self, *args, options: options)
+        def perform_in(delay, *args, options: EMPTY_OPTIONS) = Async::Background::Queue.enqueue_in(delay, self, *args, options: options)
+        def perform_at(time, *args, options: EMPTY_OPTIONS)  = Async::Background::Queue.enqueue_at(time, self, *args, options: options)
 
         def options(**values)
           @options = Options.new(**values).to_h.compact
         end
 
         def resolve_options = @options || {}
+        def queue_options = @options || EMPTY_OPTIONS
       end
 
       def perform(*)
