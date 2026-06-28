@@ -192,13 +192,24 @@ module Async
           WHERE status = 'failed'
         SQL
 
-        CREATE_RUNNING_INDEX = <<~SQL.freeze
-          CREATE INDEX IF NOT EXISTS idx_jobs_running
-          ON jobs(locked_at)
-          WHERE status = 'running'
+        CREATE_EXECUTING_INDEX = <<~SQL.freeze
+          CREATE INDEX IF NOT EXISTS idx_jobs_executing_started_at
+          ON jobs(started_at)
+          WHERE status = 'running' AND started_at IS NOT NULL
         SQL
 
-        CREATE_DASHBOARD_INDEXES = [CREATE_DONE_INDEX, CREATE_FAILED_INDEX, CREATE_RUNNING_INDEX].freeze
+        CREATE_CLAIMED_INDEX = <<~SQL.freeze
+          CREATE INDEX IF NOT EXISTS idx_jobs_claimed_locked_at
+          ON jobs(locked_at)
+          WHERE status = 'running' AND started_at IS NULL
+        SQL
+
+        CREATE_DASHBOARD_INDEXES = [
+          CREATE_DONE_INDEX,
+          CREATE_FAILED_INDEX,
+          CREATE_EXECUTING_INDEX,
+          CREATE_CLAIMED_INDEX
+        ].freeze
       end
     end
   end

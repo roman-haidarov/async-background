@@ -13,6 +13,8 @@ module Async
         private
 
         def build_heap(config_path)
+          return MinHeap.new if config_path.nil?
+
           schedule = load_schedule(config_path)
           build_entries(schedule, monotonic_now)
         end

@@ -29,8 +29,11 @@ module Async
                   :metrics,
                   :queue_store
 
+      # `config_path: nil` explicitly disables recurring jobs. This keeps the
+      # dynamic SQLite queue usable on its own; a supplied path remains strict
+      # so a typo cannot silently disable scheduled work.
       def initialize(
-        config_path:,
+        config_path: nil,
         job_count: 2,
         worker_index:,
         total_workers:,
@@ -53,8 +56,9 @@ module Async
 
         @drain_barrier = ::Async::Barrier.new
         @semaphore = ::Async::Semaphore.new(job_count, parent: @drain_barrier)
-        @heap = build_heap(config_path)
+        @heap = config_path.nil? ? MinHeap.new : build_heap(config_path)
         setup_queue(queue_socket_dir, queue_db_path, queue_mmap)
+        validate_work_source!(config_path)
       end
 
       def run
@@ -82,6 +86,11 @@ module Async
       private
 
       def scheduler_loop(task)
+        # Queue-only workers have no heap entry to sleep on. Keep the runner
+        # alive until #stop / SIGTERM wakes this condition; the queue listener
+        # continues independently in its own Async task.
+        return shutdown.wait if heap.empty? && @listen_queue
+
         loop do
           entry = heap.peek
           break unless entry
@@ -91,6 +100,12 @@ module Async
 
           dispatch_due_entries
         end
+      end
+
+      def validate_work_source!(config_path)
+        return unless config_path.nil? && !@listen_queue
+
+        raise ConfigError, 'Runner requires config_path or queue_socket_dir'
       end
 
       def wait_for_next_entry(task, entry)

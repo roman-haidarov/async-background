@@ -109,7 +109,8 @@ RSpec.describe 'Async::Background::Queue schema migrations', type: :unit do
       'idx_jobs_pending',
       'idx_jobs_done_finished_at',
       'idx_jobs_failed_finished_at',
-      'idx_jobs_running'
+      'idx_jobs_executing_started_at',
+      'idx_jobs_claimed_locked_at'
     )
 
     schema_version = @db.get_first_value('PRAGMA schema_version')
@@ -125,7 +126,8 @@ RSpec.describe 'Async::Background::Queue schema migrations', type: :unit do
       'idx_jobs_pending',
       'idx_jobs_done_finished_at',
       'idx_jobs_failed_finished_at',
-      'idx_jobs_running'
+      'idx_jobs_executing_started_at',
+      'idx_jobs_claimed_locked_at'
     )
   end
 
@@ -167,15 +169,36 @@ RSpec.describe 'Async::Background::Queue schema migrations', type: :unit do
         "SELECT id FROM jobs WHERE status = 'failed' " \
         'ORDER BY finished_at DESC, id DESC LIMIT 50'
       ),
-      in_flight: plan_details(
+      done_after: plan_details(
         @db,
-        "SELECT id FROM jobs WHERE status = 'running' ORDER BY locked_at ASC, id ASC LIMIT 50"
+        "SELECT id FROM jobs WHERE status = 'done' AND (finished_at, id) < (?, ?) " \
+        'ORDER BY finished_at DESC, id DESC LIMIT 50',
+        [now + 10, 9_999]
+      ),
+      pending_after: plan_details(
+        @db,
+        "SELECT id FROM jobs WHERE status = 'pending' AND (run_at, id) > (?, ?) " \
+        'ORDER BY run_at ASC, id ASC LIMIT 50',
+        [now - 10, 0]
+      ),
+      executing: plan_details(
+        @db,
+        "SELECT id FROM jobs WHERE status = 'running' AND started_at IS NOT NULL " \
+        'ORDER BY started_at ASC, id ASC LIMIT 50'
+      ),
+      claimed: plan_details(
+        @db,
+        "SELECT id FROM jobs WHERE status = 'running' AND started_at IS NULL " \
+        'ORDER BY locked_at ASC, id ASC LIMIT 50'
       )
     }
 
     expect(plans.fetch(:done)).to include('idx_jobs_done_finished_at')
     expect(plans.fetch(:failed)).to include('idx_jobs_failed_finished_at')
-    expect(plans.fetch(:in_flight)).to include('idx_jobs_running')
+    expect(plans.fetch(:done_after)).to include('idx_jobs_done_finished_at')
+    expect(plans.fetch(:pending_after)).to include('idx_jobs_pending')
+    expect(plans.fetch(:executing)).to include('idx_jobs_executing_started_at')
+    expect(plans.fetch(:claimed)).to include('idx_jobs_claimed_locked_at')
     plans.each_value { |plan| expect(plan).not_to include('USE TEMP B-TREE FOR ORDER BY') }
   end
 

@@ -13,7 +13,12 @@ module Async
         VERSION = 1
         MIGRATION_BUSY_TIMEOUT_MS = 30_000
         CORE_INDEXES = %w[idx_jobs_pending].freeze
-        DASHBOARD_INDEXES = %w[idx_jobs_done_finished_at idx_jobs_failed_finished_at idx_jobs_running].freeze
+        DASHBOARD_INDEXES = %w[
+          idx_jobs_done_finished_at
+          idx_jobs_failed_finished_at
+          idx_jobs_executing_started_at
+          idx_jobs_claimed_locked_at
+        ].freeze
         REQUIRED_INDEXES = CORE_INDEXES
 
         module_function

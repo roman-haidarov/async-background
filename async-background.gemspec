@@ -33,12 +33,14 @@ Gem::Specification.new do |spec|
   spec.add_dependency 'async',   '~> 2.0'
   spec.add_dependency 'console', '~> 1.0'
   spec.add_dependency 'fugit',   '~> 1.0'
+  spec.add_dependency 'base64',  '~> 0.2'
 
   # Optional: add to your own Gemfile if you need these features
-  #   gem 'sqlite3',          '~> 2.0'  # dynamic job queue
+  #   gem 'sqlite3', '~> 2.0'
   #   gem 'async-utilization', '>= 0.3', '< 0.5' # shared-memory worker metrics
 
   spec.add_development_dependency 'rake',  '~> 13.0'
   spec.add_development_dependency 'rspec', '~> 3.12'
+  spec.add_development_dependency 'rack',  '~> 3.0'
   spec.add_development_dependency 'async-utilization', '>= 0.3', '< 0.5'
 end
