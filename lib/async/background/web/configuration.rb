@@ -31,7 +31,8 @@ module Async
                       :stream_heartbeat_seconds,
                       :stream_retry_ms,
                       :title,
-                      :mount_path
+                      :mount_path,
+                      :logger
 
         def initialize
           @queue_path = Queue::Store.default_path
@@ -49,6 +50,7 @@ module Async
           @stream_retry_ms = DEFAULT_STREAM_RETRY_MS
           @title = 'Async::Background'
           @mount_path = ''
+          @logger = nil
         end
 
         def validate!
@@ -62,6 +64,7 @@ module Async
           validate_redactor!
           validate_metrics!
           validate_mount_path!
+          validate_logger!
           self
         end
 
@@ -148,9 +151,20 @@ module Async
         end
 
         def validate_mount_path!
-          return if mount_path.is_a?(String)
+          raise ConfigurationError, 'mount_path must be a String' unless mount_path.is_a?(String)
+          return if mount_path.empty?
 
-          raise ConfigurationError, 'mount_path must be a String'
+          raise ConfigurationError, 'mount_path must start with "/" or be empty' unless mount_path.start_with?('/')
+          raise ConfigurationError, 'mount_path must not end with "/"' if mount_path.end_with?('/')
+          raise ConfigurationError, 'mount_path must not contain control characters' if mount_path.match?(/[[:cntrl:]]/)
+          raise ConfigurationError, 'mount_path must not contain whitespace' if mount_path.match?(/\s/)
+        end
+
+        def validate_logger!
+          return if logger.nil?
+          return if logger.respond_to?(:warn) && logger.respond_to?(:error)
+
+          raise ConfigurationError, 'logger must respond to #warn and #error'
         end
       end
     end

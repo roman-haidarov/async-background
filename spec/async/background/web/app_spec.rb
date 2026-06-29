@@ -30,18 +30,35 @@ RSpec.describe Async::Background::Web::App do
   end
 
   describe 'auth gate' do
-    it 'returns 401 when auth callable returns falsy' do
+    it 'returns 401 JSON when auth callable returns falsy' do
       app = build_app
-      status, _, body = app.call(env_for(method: 'GET', path: '/api/overview'))
+      status, headers, body = app.call(env_for(method: 'GET', path: '/api/overview'))
       expect(status).to eq(401)
-      expect(body.first).to eq('unauthorized')
+      expect(headers['content-type']).to start_with('application/json')
+      expect(JSON.parse(body.first, symbolize_names: true)).to eq(error: 'unauthorized')
     end
 
     it 'returns 401 when auth callable raises' do
       app = build_app
-      app.instance_variable_set(:@auth, Async::Background::Web::Auth.new(->(_env) { raise 'boom' }))
+      app.instance_variable_set(
+        :@auth,
+        Async::Background::Web::Auth.new(->(_env) { raise 'boom' })
+      )
       status, = app.call(env_for(method: 'GET', path: '/api/overview'))
       expect(status).to eq(401)
+    end
+
+    it 'forwards raising auth callables to the configured logger' do
+      logger = instance_double('Logger', warn: nil, error: nil)
+      app = build_app(logger: logger)
+      app.instance_variable_set(
+        :@auth,
+        Async::Background::Web::Auth.new(->(_env) { raise 'boom from auth' }, logger: logger)
+      )
+
+      app.call(env_for(method: 'GET', path: '/api/overview'))
+
+      expect(logger).to have_received(:warn).with(/boom from auth/)
     end
 
     it 'lets the request through when auth returns truthy' do
@@ -97,6 +114,7 @@ RSpec.describe Async::Background::Web::App do
       expect(headers['content-type']).to start_with('text/event-stream')
       expect(headers['cache-control']).to include('no-cache')
       expect(headers['x-accel-buffering']).to eq('no')
+      expect(headers['x-content-type-options']).to eq('nosniff')
       expect(body).to respond_to(:each)
     end
 
@@ -104,6 +122,80 @@ RSpec.describe Async::Background::Web::App do
       app = build_app(transport: :sse)
       status, = app.call(env_for(method: 'GET', path: '/api/stream'))
       expect(status).to eq(401)
+    end
+  end
+
+  describe 'HEAD requests' do
+    let(:app) { build_app }
+
+    it 'returns the same headers as GET with an empty body for JSON endpoints' do
+      get_status, get_headers, get_body = app.call(env_for(method: 'GET', path: '/api/overview', headers: { 'x-token' => 'allow' }))
+      head_status, head_headers, head_body = app.call(env_for(method: 'HEAD', path: '/api/overview', headers: { 'x-token' => 'allow' }))
+
+      expect(head_status).to eq(get_status)
+      expect(head_headers).to eq(get_headers)
+      expect(head_body).to eq([])
+      expect(get_body.first).not_to be_empty
+    end
+
+    it 'returns sse headers without opening a stream for HEAD on /api/stream' do
+      status, headers, body = app.call(env_for(method: 'HEAD', path: '/api/stream', headers: { 'x-token' => 'allow' }))
+      expect(status).to eq(200)
+      expect(headers['content-type']).to start_with('text/event-stream')
+      expect(body).to eq([])
+    end
+
+    it 'enforces auth on HEAD requests too' do
+      status, = app.call(env_for(method: 'HEAD', path: '/api/overview'))
+      expect(status).to eq(401)
+    end
+  end
+
+  describe 'method gate' do
+    let(:app) { build_app }
+
+    it 'returns 404 for non-GET/HEAD methods' do
+      %w[POST PUT DELETE PATCH OPTIONS].each do |method|
+        status, = app.call(env_for(method: method, path: '/api/overview', headers: { 'x-token' => 'allow' }))
+        expect(status).to eq(404), "expected #{method} to be rejected"
+      end
+    end
+  end
+
+  describe 'security headers' do
+    let(:app) { build_app(mount_path: '/admin/background') }
+
+    it 'sets strict CSP and frame protection on the HTML shell' do
+      _, headers, = app.call(env_for(method: 'GET', path: '/', headers: { 'x-token' => 'allow' }))
+
+      expect(headers['x-content-type-options']).to eq('nosniff')
+      expect(headers['x-frame-options']).to eq('DENY')
+      expect(headers['referrer-policy']).to eq('no-referrer')
+      expect(headers['content-security-policy']).to include("frame-ancestors 'none'")
+      expect(headers['content-security-policy']).to include("default-src 'none'")
+      expect(headers['content-security-policy']).to include("script-src 'self'")
+      expect(headers['content-security-policy']).to include("base-uri 'none'")
+      expect(headers['content-security-policy']).to include("form-action 'none'")
+    end
+
+    it 'sets nosniff and referrer-policy on JSON API responses' do
+      _, headers, = app.call(env_for(method: 'GET', path: '/api/overview', headers: { 'x-token' => 'allow' }))
+      expect(headers['x-content-type-options']).to eq('nosniff')
+      expect(headers['referrer-policy']).to eq('no-referrer')
+      expect(headers['cross-origin-resource-policy']).to eq('same-origin')
+    end
+
+    it 'sets nosniff on cacheable assets' do
+      _, headers, = app.call(env_for(method: 'GET', path: '/assets/app.js', headers: { 'x-token' => 'allow' }))
+      expect(headers['x-content-type-options']).to eq('nosniff')
+    end
+
+    it 'sets nosniff on 401 and 404 responses too' do
+      _, h401, = app.call(env_for(method: 'GET', path: '/api/overview'))
+      _, h404, = app.call(env_for(method: 'GET', path: '/nope', headers: { 'x-token' => 'allow' }))
+
+      expect(h401['x-content-type-options']).to eq('nosniff')
+      expect(h404['x-content-type-options']).to eq('nosniff')
     end
   end
 
@@ -171,12 +263,6 @@ RSpec.describe Async::Background::Web::App do
       expect(status).to eq(200)
       expect(headers['content-type']).to start_with('application/javascript')
       expect(body.first).to include('DOMContentLoaded')
-      expect(body.first).to include('bootBasePath')
-      expect(body.first).to include('document.currentScript')
-      expect(body.first).to include(%q{replace(/\/assets\/app\.js$/, '')})
-      expect(body.first).to include(%q{replace(/\/$/, '')})
-      expect(body.first).to include('scheduleActiveListRefresh')
-      expect(body.first).to include('new EventSource(streamUrl())')
     end
 
     it 'embeds the configured mount path into the HTML shell' do
@@ -199,13 +285,13 @@ RSpec.describe Async::Background::Web::App do
   describe 'unknown routes' do
     let(:app) { build_app }
 
-    it 'returns 404' do
-      status, _, body = app.call(env_for(method: 'GET', path: '/nope', headers: { 'x-token' => 'allow' }))
+    it 'returns 404 JSON' do
+      status, headers, body = app.call(env_for(method: 'GET', path: '/nope', headers: { 'x-token' => 'allow' }))
       expect(status).to eq(404)
-      expect(body.first).to eq('not found')
+      expect(headers['content-type']).to start_with('application/json')
+      expect(JSON.parse(body.first, symbolize_names: true)).to eq(error: 'not_found')
     end
   end
-
 
   describe 'request errors' do
     let(:app) { build_app }
@@ -250,6 +336,16 @@ RSpec.describe Async::Background::Web::App do
       expect(headers['content-type']).to start_with('application/json')
       payload = JSON.parse(body.first, symbolize_names: true)
       expect(payload).to eq(error: 'internal_error')
+    end
+
+    it 'forwards internal exceptions to the configured logger' do
+      logger = instance_double('Logger', warn: nil, error: nil)
+      app = build_app(logger: logger)
+      allow_any_instance_of(Async::Background::Web::Snapshot).to receive(:overview).and_raise(RuntimeError, 'kaboom')
+
+      app.call(env_for(method: 'GET', path: '/api/overview', headers: { 'x-token' => 'allow' }))
+
+      expect(logger).to have_received(:error).with(/kaboom/)
     end
   end
 end

@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 560" font-family="ui-sans-serif, -apple-system, Segoe UI, Roboto, sans-serif">
+  <style>
+    :root, svg               { color-scheme: light dark; }
+    .ink                     { fill: #1f2937; }
+    .ink-dim                 { fill: #4b5563; }
+    .ink-muted               { fill: #6b7280; }
+    .panel                   { fill: #f9fafb; stroke: #d1d5db; stroke-width: 1; }
+    .thread-host             { fill: none; stroke: #9ca3af; stroke-dasharray: 3 3; stroke-width: 1; }
+    @media (prefers-color-scheme: dark) {
+      .ink                   { fill: #e5e7eb; }
+      .ink-dim               { fill: #d1d5db; }
+      .ink-muted             { fill: #9ca3af; }
+      .panel                 { fill: #1f2937; stroke: #374151; }
+      .thread-host           { stroke: #6b7280; }
+    }
+    .title       { font-size: 18px; font-weight: 600; }
+    .subtitle    { font-size: 13px; }
+    .server      { font-size: 16px; font-weight: 600; text-anchor: middle; }
+    .stat        { font-size: 12px; text-anchor: middle; }
+    .footnote    { font-size: 12px; text-anchor: middle; }
+    .label       { font-size: 12px; font-weight: 600; text-anchor: middle; }
+    .label-light { font-size: 11px; text-anchor: middle; }
+    .arrow-text  { font-size: 11px; font-style: italic; }
+
+    .process     { fill: #fecaca; fill-opacity: 0.45; stroke: #ef4444; stroke-width: 1.5; }
+    .thread      { fill: #fde68a; fill-opacity: 0.50; stroke: #f59e0b; stroke-width: 1.5; }
+    .fiber       { fill: #6ee7b7; stroke: #10b981; stroke-width: 1; }
+    .fiber-active{ fill: #10b981; stroke: #047857; stroke-width: 2; }
+  </style>
+
+  <text x="40"  y="36" class="title ink">One dashboard tab → one SSE connection</text>
+  <text x="40"  y="58" class="subtitle ink-dim">What each Ruby web server has to keep open for the lifetime of the tab.</text>
+
+  <text x="155" y="100" class="server ink">Unicorn</text>
+  <rect x="40"  y="118" width="230" height="340" rx="8" class="panel"/>
+  <rect x="60"  y="140" width="190" height="280" rx="6" class="process"/>
+  <text x="155" y="265" class="label ink">1 PROCESS</text>
+  <text x="155" y="285" class="label-light ink-dim">stuck on the SSE</text>
+  <text x="155" y="301" class="label-light ink-dim">response forever</text>
+  <text x="155" y="442" class="stat ink-dim">~30 MB resident</text>
+  <text x="155" y="478" class="stat ink"      font-weight="600">10 tabs ⇒ 10 forks</text>
+  <text x="155" y="497" class="stat ink-muted">(usually broken: timeout kills SSE)</text>
+
+  <text x="440" y="100" class="server ink">Puma</text>
+  <rect x="325" y="118" width="230" height="340" rx="8" class="panel"/>
+  <rect x="345" y="140" width="190" height="280" rx="6" class="thread-host"/>
+  <text x="440" y="160" class="label-light ink-muted">process</text>
+  <rect x="370" y="200" width="140" height="180" rx="5" class="thread"/>
+  <text x="440" y="290" class="label ink">1 THREAD</text>
+  <text x="440" y="308" class="label-light ink-dim">parked on yield</text>
+  <text x="440" y="324" class="label-light ink-dim">for the whole tab</text>
+  <text x="440" y="442" class="stat ink-dim">~8 MB stack</text>
+  <text x="440" y="478" class="stat ink"      font-weight="600">10 tabs ⇒ default pool (5)</text>
+  <text x="440" y="497" class="stat ink-muted">is fully consumed</text>
+
+  <text x="725" y="100" class="server ink">Falcon</text>
+  <rect x="610" y="118" width="230" height="340" rx="8" class="panel"/>
+  <rect x="630" y="140" width="190" height="280" rx="6" class="thread-host"/>
+  <text x="725" y="160" class="label-light ink-muted">1 thread hosts many fibers</text>
+
+  <g>
+    <circle cx="660" cy="200" r="9" class="fiber" opacity="0.55"/>
+    <circle cx="685" cy="200" r="9" class="fiber" opacity="0.55"/>
+    <circle cx="710" cy="200" r="9" class="fiber" opacity="0.55"/>
+    <circle cx="735" cy="200" r="9" class="fiber" opacity="0.55"/>
+    <circle cx="760" cy="200" r="9" class="fiber" opacity="0.55"/>
+    <circle cx="785" cy="200" r="9" class="fiber" opacity="0.55"/>
+    <circle cx="660" cy="225" r="9" class="fiber" opacity="0.55"/>
+    <circle cx="685" cy="225" r="9" class="fiber" opacity="0.55"/>
+    <circle cx="710" cy="225" r="11" class="fiber-active"/>
+    <circle cx="735" cy="225" r="9" class="fiber" opacity="0.55"/>
+    <circle cx="760" cy="225" r="9" class="fiber" opacity="0.55"/>
+    <circle cx="785" cy="225" r="9" class="fiber" opacity="0.55"/>
+    <circle cx="660" cy="250" r="9" class="fiber" opacity="0.55"/>
+    <circle cx="685" cy="250" r="9" class="fiber" opacity="0.55"/>
+    <circle cx="710" cy="250" r="9" class="fiber" opacity="0.55"/>
+    <circle cx="735" cy="250" r="9" class="fiber" opacity="0.55"/>
+    <circle cx="760" cy="250" r="9" class="fiber" opacity="0.55"/>
+    <circle cx="785" cy="250" r="9" class="fiber" opacity="0.55"/>
+    <circle cx="660" cy="275" r="9" class="fiber" opacity="0.55"/>
+    <circle cx="685" cy="275" r="9" class="fiber" opacity="0.55"/>
+    <circle cx="710" cy="275" r="9" class="fiber" opacity="0.55"/>
+    <circle cx="735" cy="275" r="9" class="fiber" opacity="0.55"/>
+    <circle cx="760" cy="275" r="9" class="fiber" opacity="0.55"/>
+    <circle cx="785" cy="275" r="9" class="fiber" opacity="0.55"/>
+  </g>
+
+  <path d="M 590 225 Q 640 230 695 225" fill="none" stroke="#6b7280" stroke-width="1.2"/>
+  <polygon points="695,225 688,221 688,229" fill="#6b7280"/>
+  <text x="545" y="208" class="arrow-text ink-muted">the SSE</text>
+  <text x="545" y="222" class="arrow-text ink-muted">fiber</text>
+
+  <text x="725" y="332" class="label-light ink-dim">… and dozens more</text>
+  <text x="725" y="348" class="label-light ink-dim">available for everything</text>
+  <text x="725" y="364" class="label-light ink-dim">else the app does</text>
+
+  <text x="725" y="442" class="stat ink-dim">~4 KB stack per fiber</text>
+  <text x="725" y="478" class="stat ink"      font-weight="600">10 tabs ⇒ 10 fibers</text>
+  <text x="725" y="497" class="stat ink-muted">(~40 KB, 1 thread, mostly asleep)</text>
+
+  <text x="440" y="540" class="footnote ink-muted">
+    Stack sizes are typical defaults (MRI 3.3). The dashboard's per-tab SSE response stays open for hours; the holding cost is what matters.
+  </text>
+</svg>
