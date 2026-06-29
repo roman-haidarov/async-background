@@ -1,41 +1,80 @@
 # frozen_string_literal: true
 
+require_relative '../clock'
+
 module Async
   module Background
     module Web
       class Stream
-        def initialize(hub, heartbeat_seconds:, retry_ms:)
+        include Clock
+
+        def initialize(hub, heartbeat_seconds:, retry_ms:, poll_seconds:, logger: nil)
           @hub = hub
           @heartbeat_seconds = heartbeat_seconds
           @retry_ms = retry_ms
+          @poll_seconds = poll_seconds
+          @logger = logger
         end
 
         def each
-          subscription, initial_frame = @hub.subscribe
           yield "retry: #{@retry_ms}\n\n"
-          yield initial_frame
+
+          version, frame = initial_state
+          if version.nil?
+            yield EventHub::UNAVAILABLE_FRAME
+            return
+          end
+
+          yield frame
+          last_yield = monotonic_now
+          unavailable_announced = false
 
           loop do
-            frame = subscription.pop(timeout: @heartbeat_seconds)
-            break if frame.nil? && subscription.closed?
+            sleep_for_poll
 
-            yield(frame || EventHub::HEARTBEAT_FRAME)
+            begin
+              new_version = @hub.current_version
+
+              if new_version != version
+                version = new_version
+                yield @hub.frame_for(version)
+                last_yield = monotonic_now
+              elsif (monotonic_now - last_yield) >= @heartbeat_seconds
+                yield EventHub::HEARTBEAT_FRAME
+                last_yield = monotonic_now
+              end
+
+              unavailable_announced = false
+            rescue ClosedError
+              break
+            rescue UnavailableError
+              unless unavailable_announced
+                yield EventHub::UNAVAILABLE_FRAME
+                unavailable_announced = true
+                last_yield = monotonic_now
+              end
+            end
           end
-        rescue Errno::EPIPE, IOError
+        rescue Errno::EPIPE, Errno::ECONNRESET, IOError
           nil
-        rescue ClosedError, UnavailableError
-          safe_yield(EventHub::UNAVAILABLE_FRAME) { |frame| yield frame }
+        rescue StandardError => error
+          @logger&.error(
+            "[async-background-web] SSE stream terminated: " \
+            "#{error.class}: #{error.message}"
+          )
           nil
-        ensure
-          @hub.unsubscribe(subscription) if subscription
         end
 
         private
 
-        def safe_yield(frame)
-          yield frame
-        rescue Errno::EPIPE, IOError
-          nil
+        def initial_state
+          @hub.initial_frame
+        rescue ClosedError, UnavailableError
+          [nil, nil]
+        end
+
+        def sleep_for_poll
+          sleep(@poll_seconds)
         end
       end
     end

@@ -2,7 +2,6 @@
 
 require 'spec_helper'
 require 'async/background/web'
-require 'timeout'
 
 RSpec.describe Async::Background::Web::EventHub do
   class HubSnapshot
@@ -41,51 +40,85 @@ RSpec.describe Async::Background::Web::EventHub do
     JSON.parse(frame.split("data: ", 2).last, symbolize_names: true)
   end
 
-  def wait_for(timeout: 1)
-    Timeout.timeout(timeout) do
-      loop do
-        value = yield
-        return value if value
+  describe '#current_version' do
+    it 'reads the snapshot data_version' do
+      hub = described_class.new(HubSnapshot.new(version: 7), HubSerializer.new)
+      expect(hub.current_version).to eq(7)
+    end
 
-        sleep(0.005)
-      end
+    it 'raises ClosedError when the hub is closed' do
+      hub = described_class.new(HubSnapshot.new, HubSerializer.new)
+      hub.close
+      expect { hub.current_version }.to raise_error(Async::Background::Web::ClosedError)
     end
   end
 
-  it 'fans one committed change out to every connected stream' do
-    snapshot = HubSnapshot.new
-    hub = described_class.new(snapshot, HubSerializer.new, poll_seconds: 0.01)
-    first, first_frame = hub.subscribe
-    second, second_frame = hub.subscribe
+  describe '#initial_frame' do
+    it 'returns the current version and a rendered overview frame' do
+      snapshot = HubSnapshot.new(version: 3)
+      hub = described_class.new(snapshot, HubSerializer.new)
+      version, frame = hub.initial_frame
+      expect(version).to eq(3)
+      expect(parse_overview(frame).fetch(:data_version)).to eq(3)
+    end
 
-    expect(parse_overview(first_frame).fetch(:data_version)).to eq(1)
-    expect(parse_overview(second_frame).fetch(:data_version)).to eq(1)
+    it 'always refreshes — does not serve a frame older than now' do
+      snapshot = HubSnapshot.new(version: 1)
+      hub = described_class.new(snapshot, HubSerializer.new)
+      hub.initial_frame
+      snapshot.advance!
+      version, frame = hub.initial_frame
+      expect(version).to eq(2)
+      expect(parse_overview(frame).fetch(:data_version)).to eq(2)
+    end
 
-    snapshot.advance!
-
-    first_update = wait_for { first.pop(timeout: 0.02) }
-    second_update = wait_for { second.pop(timeout: 0.02) }
-    expect(parse_overview(first_update).fetch(:data_version)).to eq(2)
-    expect(parse_overview(second_update).fetch(:data_version)).to eq(2)
-  ensure
-    hub&.close
+    it 'raises ClosedError when closed' do
+      hub = described_class.new(HubSnapshot.new, HubSerializer.new)
+      hub.close
+      expect { hub.initial_frame }.to raise_error(Async::Background::Web::ClosedError)
+    end
   end
 
-  it 'keeps only the newest pending frame for a slow subscriber' do
-    subscription = described_class::Subscription.new
-    subscription.publish('older')
-    subscription.publish('newest')
+  describe '#frame_for' do
+    it 'caches the rendered frame by data_version' do
+      snapshot = HubSnapshot.new(version: 5)
+      serializer = HubSerializer.new
+      expect(serializer).to receive(:overview).once.and_call_original
 
-    expect(subscription.pop(timeout: 0)).to eq('newest')
+      hub = described_class.new(snapshot, serializer)
+      first  = hub.frame_for(5)
+      second = hub.frame_for(5)
+
+      expect(first).to eq(second)
+    end
+
+    it 'refreshes when the requested version differs from cache' do
+      snapshot = HubSnapshot.new(version: 1)
+      hub = described_class.new(snapshot, HubSerializer.new)
+
+      hub.frame_for(1)
+      snapshot.advance!
+      frame = hub.frame_for(snapshot.data_version)
+
+      expect(parse_overview(frame).fetch(:data_version)).to eq(2)
+    end
+
+    it 'raises ClosedError when closed' do
+      hub = described_class.new(HubSnapshot.new, HubSerializer.new)
+      hub.close
+      expect { hub.frame_for(1) }.to raise_error(Async::Background::Web::ClosedError)
+    end
   end
 
-  it 'unblocks a waiting subscriber when it is closed' do
-    subscription = described_class::Subscription.new
-    waiter = Thread.new { subscription.pop(timeout: 5) }
-    sleep(0.01)
-    subscription.close
-
-    expect(waiter.join(1)).not_to be_nil
-    expect(waiter.value).to be_nil
+  describe 'no background thread' do
+    it 'creates no additional threads on construction or use' do
+      before = Thread.list.size
+      hub = described_class.new(HubSnapshot.new, HubSerializer.new)
+      10.times { hub.frame_for(1) }
+      hub.initial_frame
+      expect(Thread.list.size).to eq(before)
+    ensure
+      hub&.close
+    end
   end
 end

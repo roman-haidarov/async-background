@@ -6,7 +6,8 @@ module Async
       class App
         def initialize(config)
           @config = config.validate!
-          @auth = Auth.new(@config.auth)
+          @logger = @config.logger
+          @auth = Auth.new(@config.auth, logger: @logger)
           @snapshot = Snapshot.new(path: @config.queue_path, counts_cache_ttl: @config.counts_cache_ttl).open!
           @metrics_reader = build_metrics_reader
           @serializer = Serializer.new(@config)
@@ -15,20 +16,12 @@ module Async
         end
 
         def call(env)
-          return Response.unauthorized unless @auth.authorized?(env)
+          head = env['REQUEST_METHOD'] == 'HEAD'
+          response = handle(env, head: head)
+          return response unless head
 
-          route = @router.match(env)
-          return Response.not_found unless route
-
-          dispatch(route, env)
-        rescue RequestError => error
-          Response.bad_request(error.message)
-        rescue UnavailableError, ClosedError
-          Response.unavailable
-        rescue StandardError
-          # Do not turn internal class names, paths or database errors into an
-          # unauthenticated information disclosure channel.
-          Response.internal_error
+          status, headers, _body = response
+          [status, headers, []]
         end
 
         def close
@@ -39,6 +32,29 @@ module Async
 
         private
 
+        def handle(env, head:)
+          return Response.unauthorized unless @auth.authorized?(env)
+
+          route = @router.match(env)
+          return Response.not_found unless route
+
+          if head && route == :stream
+            return @config.transport == :sse ? [200, Response.sse_headers, []] : Response.not_found
+          end
+
+          dispatch(route, env)
+        rescue RequestError => error
+          Response.bad_request(error.message)
+        rescue UnavailableError, ClosedError
+          Response.unavailable
+        rescue StandardError => error
+          # Do not turn internal class names, paths or database errors into an
+          # unauthenticated information disclosure channel — but do surface
+          # them to the operator via the configured logger.
+          log_internal_error(env, error)
+          Response.internal_error
+        end
+
         def build_metrics_reader
           return unless @config.metrics_enabled?
 
@@ -48,12 +64,7 @@ module Async
         def build_event_hub
           return unless @config.transport == :sse
 
-          EventHub.new(
-            @snapshot,
-            @serializer,
-            metrics_reader: @metrics_reader,
-            poll_seconds: @config.stream_poll_seconds
-          )
+          EventHub.new(@snapshot, @serializer, metrics_reader: @metrics_reader)
         end
 
         def dispatch(route, env)
@@ -128,8 +139,18 @@ module Async
             Stream.new(
               @event_hub,
               heartbeat_seconds: @config.stream_heartbeat_seconds,
-              retry_ms: @config.stream_retry_ms
+              retry_ms: @config.stream_retry_ms,
+              poll_seconds: @config.stream_poll_seconds,
+              logger: @logger
             )
+          )
+        end
+
+        def log_internal_error(env, error)
+          @logger&.error(
+            "[async-background-web] internal error on " \
+            "#{env['REQUEST_METHOD']} #{env['PATH_INFO']}: " \
+            "#{error.class}: #{error.message}"
           )
         end
       end

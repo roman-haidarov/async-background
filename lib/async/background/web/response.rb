@@ -15,9 +15,27 @@ module Async
         CSS_TYPE = 'text/css; charset=utf-8'
         NO_STORE = 'no-store'
         ASSET_CACHE = 'public, max-age=31536000, immutable'
+        BASE_SECURITY_HEADERS = {
+          'x-content-type-options' => 'nosniff',
+          'referrer-policy' => 'no-referrer',
+          'cross-origin-resource-policy' => 'same-origin'
+        }.freeze
 
-        UNAUTHORIZED_BODY = 'unauthorized'
-        NOT_FOUND_BODY = 'not found'
+        HTML_SECURITY_HEADERS = BASE_SECURITY_HEADERS.merge(
+          'x-frame-options' => 'DENY',
+          'content-security-policy' =>
+            "default-src 'none'; " \
+            "script-src 'self'; " \
+            "style-src 'self'; " \
+            "img-src 'self' data:; " \
+            "connect-src 'self'; " \
+            "frame-ancestors 'none'; " \
+            "base-uri 'none'; " \
+            "form-action 'none'"
+        ).freeze
+
+        UNAUTHORIZED_BODY = JSON.generate(error: 'unauthorized').freeze
+        NOT_FOUND_BODY = JSON.generate(error: 'not_found').freeze
         BAD_REQUEST_BODY = JSON.generate(error: 'invalid_request').freeze
         UNAVAILABLE_BODY = JSON.generate(error: 'service_unavailable').freeze
         INTERNAL_ERROR_BODY = JSON.generate(error: 'internal_error').freeze
@@ -32,7 +50,7 @@ module Async
         end
 
         def html(body)
-          [200, no_store_headers(HTML_TYPE), [body]]
+          [200, html_headers, [body]]
         end
 
         def javascript(body)
@@ -44,11 +62,11 @@ module Async
         end
 
         def unauthorized
-          [401, no_store_headers(TEXT_TYPE), [UNAUTHORIZED_BODY]]
+          [401, no_store_headers(JSON_TYPE), [UNAUTHORIZED_BODY]]
         end
 
         def not_found
-          [404, no_store_headers(TEXT_TYPE), [NOT_FOUND_BODY]]
+          [404, no_store_headers(JSON_TYPE), [NOT_FOUND_BODY]]
         end
 
         def bad_request(message = nil)
@@ -65,11 +83,15 @@ module Async
         end
 
         def no_store_headers(content_type)
-          {'content-type' => content_type, 'cache-control' => NO_STORE}
+          {'content-type' => content_type, 'cache-control' => NO_STORE}.merge(BASE_SECURITY_HEADERS)
+        end
+
+        def html_headers
+          {'content-type' => HTML_TYPE, 'cache-control' => NO_STORE}.merge(HTML_SECURITY_HEADERS)
         end
 
         def asset_headers(content_type)
-          {'content-type' => content_type, 'cache-control' => ASSET_CACHE}
+          {'content-type' => content_type, 'cache-control' => ASSET_CACHE}.merge(BASE_SECURITY_HEADERS)
         end
 
         def sse_headers
@@ -77,7 +99,7 @@ module Async
             'content-type' => EVENT_STREAM_TYPE,
             'cache-control' => 'no-cache, no-transform',
             'x-accel-buffering' => 'no'
-          }
+          }.merge(BASE_SECURITY_HEADERS)
         end
       end
     end

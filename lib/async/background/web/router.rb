@@ -19,8 +19,10 @@ module Async
           '/api/stream' => :stream
         }.freeze
 
+        ALLOWED_METHODS = %w[GET HEAD].freeze
+
         def match(env)
-          return unless env['REQUEST_METHOD'] == 'GET'
+          return unless ALLOWED_METHODS.include?(env['REQUEST_METHOD'])
 
           GET_ROUTES[env['PATH_INFO'] || '/']
         end

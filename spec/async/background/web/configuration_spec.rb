@@ -6,6 +6,11 @@ require 'async/background/web'
 RSpec.describe Async::Background::Web::Configuration do
   let(:config) { described_class.new }
 
+  def minimal!
+    config.queue_path = '/tmp/q.db'
+    config.auth = ->(_env) { true }
+  end
+
   describe '#validate!' do
     it 'requires queue_path' do
       config.queue_path = nil
@@ -32,8 +37,7 @@ RSpec.describe Async::Background::Web::Configuration do
     end
 
     it 'requires list_limit in range' do
-      config.queue_path = '/tmp/q.db'
-      config.auth = ->(_env) { true }
+      minimal!
       config.list_limit = 0
       expect { config.validate! }.to raise_error(Async::Background::Web::ConfigurationError, /list_limit/)
       config.list_limit = 500
@@ -41,36 +45,31 @@ RSpec.describe Async::Background::Web::Configuration do
     end
 
     it 'requires non-negative counts_cache_ttl' do
-      config.queue_path = '/tmp/q.db'
-      config.auth = ->(_env) { true }
+      minimal!
       config.counts_cache_ttl = -1
       expect { config.validate! }.to raise_error(Async::Background::Web::ConfigurationError, /counts_cache_ttl/)
     end
 
     it 'requires poll_interval_ms >= 200' do
-      config.queue_path = '/tmp/q.db'
-      config.auth = ->(_env) { true }
+      minimal!
       config.poll_interval_ms = 100
       expect { config.validate! }.to raise_error(Async::Background::Web::ConfigurationError, /poll_interval_ms/)
     end
 
     it 'requires transport to be one of :polling or :sse' do
-      config.queue_path = '/tmp/q.db'
-      config.auth = ->(_env) { true }
+      minimal!
       config.transport = :ws
       expect { config.validate! }.to raise_error(Async::Background::Web::ConfigurationError, /transport/)
     end
 
     it 'accepts :sse transport' do
-      config.queue_path = '/tmp/q.db'
-      config.auth = ->(_env) { true }
+      minimal!
       config.transport = :sse
       expect { config.validate! }.not_to raise_error
     end
 
     it 'validates SSE timing knobs' do
-      config.queue_path = '/tmp/q.db'
-      config.auth = ->(_env) { true }
+      minimal!
       config.stream_poll_seconds = 0.05
       expect { config.validate! }.to raise_error(Async::Background::Web::ConfigurationError, /stream_poll_seconds/)
 
@@ -84,16 +83,77 @@ RSpec.describe Async::Background::Web::Configuration do
     end
 
     it 'requires total_workers when metrics_path is set' do
-      config.queue_path = '/tmp/q.db'
-      config.auth = ->(_env) { true }
+      minimal!
       config.metrics_path = '/tmp/m.shm'
       config.total_workers = nil
       expect { config.validate! }.to raise_error(Async::Background::Web::ConfigurationError, /total_workers/)
     end
 
+    describe 'mount_path' do
+      it 'accepts the empty default' do
+        minimal!
+        expect { config.validate! }.not_to raise_error
+      end
+
+      it 'accepts an absolute path without trailing slash' do
+        minimal!
+        config.mount_path = '/admin/background'
+        expect { config.validate! }.not_to raise_error
+      end
+
+      it 'rejects non-string values' do
+        minimal!
+        config.mount_path = 42
+        expect { config.validate! }.to raise_error(Async::Background::Web::ConfigurationError, /must be a String/)
+      end
+
+      it 'rejects relative paths without a leading slash' do
+        minimal!
+        config.mount_path = 'admin'
+        expect { config.validate! }.to raise_error(Async::Background::Web::ConfigurationError, /start with "\/"/)
+      end
+
+      it 'rejects a trailing slash' do
+        minimal!
+        config.mount_path = '/admin/'
+        expect { config.validate! }.to raise_error(Async::Background::Web::ConfigurationError, /not end with "\/"/)
+      end
+
+      it 'rejects control characters' do
+        minimal!
+        config.mount_path = "/admin\n"
+        expect { config.validate! }.to raise_error(Async::Background::Web::ConfigurationError, /control characters/)
+      end
+
+      it 'rejects whitespace' do
+        minimal!
+        config.mount_path = '/admin background'
+        expect { config.validate! }.to raise_error(Async::Background::Web::ConfigurationError, /whitespace/)
+      end
+    end
+
+    describe 'logger' do
+      it 'accepts nil (default)' do
+        minimal!
+        config.logger = nil
+        expect { config.validate! }.not_to raise_error
+      end
+
+      it 'accepts a logger that responds to #warn and #error' do
+        minimal!
+        config.logger = instance_double('Logger', warn: nil, error: nil)
+        expect { config.validate! }.not_to raise_error
+      end
+
+      it 'rejects a logger missing either method' do
+        minimal!
+        config.logger = Object.new
+        expect { config.validate! }.to raise_error(Async::Background::Web::ConfigurationError, /respond to #warn and #error/)
+      end
+    end
+
     it 'passes with minimal valid config' do
-      config.queue_path = '/tmp/q.db'
-      config.auth = ->(_env) { true }
+      minimal!
       expect(config.validate!).to eq(config)
     end
   end
@@ -121,6 +181,7 @@ RSpec.describe Async::Background::Web::Configuration do
       expect(config.stream_retry_ms).to eq(5000)
       expect(config.title).to eq('Async::Background')
       expect(config.mount_path).to eq('')
+      expect(config.logger).to be_nil
     end
   end
 end
