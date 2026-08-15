@@ -43,16 +43,41 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build CI image
-        run: docker compose -f docker-compose.ci.yml build scenario
+        run: docker compose -f docker-compose.ci.yml build scenario-stackprof
 
       - name: Run scenario test
         run: |
-          docker compose -f docker-compose.ci.yml run \
-            --rm \
-            -e SCENARIO_WORKERS=3 \
-            -e SCENARIO_JOBS=200 \
-            -e SCENARIO_TIMEOUT=60 \
-            scenario
+          mkdir -p tmp/stackprof
+          docker compose -f docker-compose.ci.yml run --rm scenario-stackprof
+
+      - name: StackProf report
+        if: always()
+        run: |
+          if [ ! -d tmp/stackprof ] || ! ls tmp/stackprof/*.txt >/dev/null 2>&1; then
+            echo "no stackprof reports"
+            exit 0
+          fi
+
+          {
+            echo "## StackProf"
+            echo
+            if [ -f tmp/stackprof/ci-summary.md ]; then
+              cat tmp/stackprof/ci-summary.md
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          for f in tmp/stackprof/*.txt; do
+            echo "======== $(basename "$f") ========"
+            cat "$f"
+            echo
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: stackprof-scenario
+          path: tmp/stackprof/
+          if-no-files-found: ignore
 
       - name: Cleanup
         if: always()
