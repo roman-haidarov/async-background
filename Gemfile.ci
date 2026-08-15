@@ -9,6 +9,7 @@ gem 'async-utilization', '>= 0.3', '< 0.5'
 gem 'async-container',   '~> 0.18'
 
 group :development, :test do
-  gem 'rspec',   '~> 3.12', require: false
-  gem 'rubocop', '~> 1.0',  require: false
+  gem 'rspec',     '~> 3.12', require: false
+  gem 'rubocop',   '~> 1.0',  require: false
+  gem 'stackprof', '~> 0.2',  require: false
 end

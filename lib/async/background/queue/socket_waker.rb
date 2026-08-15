@@ -80,12 +80,15 @@ module Async
           parent_task.async do
             begin
               loop do
-                client.read_nonblock(256)
-              rescue IO::WaitReadable
-                client.wait_readable
-                retry
-              rescue EOFError, Errno::ECONNRESET
-                break
+                begin
+                  client.read_nonblock(256)
+                  @notification.signal
+                rescue IO::WaitReadable
+                  client.wait_readable
+                  retry
+                rescue EOFError, Errno::ECONNRESET
+                  break
+                end
               end
             rescue => e
               Console.logger.warn(self) { "SocketWaker client handler error: #{e.class} #{e.message}" }

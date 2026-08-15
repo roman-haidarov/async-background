@@ -9,7 +9,8 @@ module Async
         BUSY_TIMEOUT = 'PRAGMA busy_timeout'.freeze
         TABLE_INFO = 'PRAGMA table_info(jobs)'.freeze
         OPTIMIZE = 'PRAGMA optimize'.freeze
-        INCREMENTAL_VACUUM = 'PRAGMA incremental_vacuum'.freeze
+        INCREMENTAL_VACUUM_PAGES = 64
+        INCREMENTAL_VACUUM = "PRAGMA incremental_vacuum(#{INCREMENTAL_VACUUM_PAGES})".freeze
         AUTO_VACUUM_INCREMENTAL = 'PRAGMA auto_vacuum = INCREMENTAL'.freeze
         BEGIN_IMMEDIATE = 'BEGIN IMMEDIATE'.freeze
         COMMIT = 'COMMIT'.freeze

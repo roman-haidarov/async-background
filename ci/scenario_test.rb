@@ -40,6 +40,7 @@ require 'timeout'
 $LOAD_PATH.unshift(File.expand_path('../lib', __dir__))
 
 require_relative 'fixtures/jobs'
+require_relative 'stackprof_support'
 
 module ScenarioTest
   module Config
@@ -207,6 +208,7 @@ module ScenarioTest
 
     def spawn_worker(index)
       pid = fork do
+        ScenarioStackprof.install_worker!(index)
         runner = Async::Background::Runner.new(
           config_path:      @schedule_path,
           job_count:        5,
@@ -424,6 +426,8 @@ module ScenarioTest
       results[:overlap]        = run_overlap_scenario
       results[:enqueue_stress] = run_enqueue_stress_scenario
 
+      ScenarioStackprof.write_reports!
+
       if results.values.all?
         Log.header('✅ ALL SCENARIOS PASSED')
         exit(0)
@@ -438,6 +442,7 @@ module ScenarioTest
 
     def run_normal_scenario
       Log.header('SCENARIO 1: NORMAL (fast + slow + failing)')
+      ScenarioStackprof.scenario = 'normal'
 
       setup_clean_state!
       enqueue_normal_jobs
@@ -470,6 +475,7 @@ module ScenarioTest
 
     def run_recovery_scenario
       Log.header('SCENARIO 2: RECOVERY (SIGKILL mid-flight)')
+      ScenarioStackprof.scenario = 'recovery'
 
       setup_clean_state!
 
@@ -511,6 +517,7 @@ module ScenarioTest
 
     def run_enqueue_perf_scenario
       Log.header("SCENARIO 3: ENQUEUE PERF (#{Config::PERF_JOBS} jobs, budget #{Config::PERF_ENQUEUE_BUDGET}s)")
+      ScenarioStackprof.scenario = 'enqueue_perf'
 
       setup_clean_state!
 
@@ -564,6 +571,7 @@ module ScenarioTest
 
     def run_enqueue_stress_scenario
       Log.header("SCENARIO 5: ENQUEUE STRESS (2 forks → 1 SQLite file, 30s)")
+      ScenarioStackprof.scenario = 'enqueue_stress'
 
       setup_clean_state!
 
@@ -649,13 +657,16 @@ module ScenarioTest
 
       t0       = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       deadline = t0 + duration
+      mode     = producer_index.zero? ? :wall : :cpu
 
-      while Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
-        begin
-          client.push(class_name, args)
-          enqueued += 1
-        rescue SQLite3::BusyException
-          busy_retries += 1
+      ScenarioStackprof.profile("producer#{producer_index}", mode: mode) do
+        while Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
+          begin
+            client.push(class_name, args)
+            enqueued += 1
+          rescue SQLite3::BusyException
+            busy_retries += 1
+          end
         end
       end
 
@@ -678,6 +689,7 @@ module ScenarioTest
 
     def run_overlap_scenario
       Log.header("SCENARIO 4: OVERLAP (every: #{Config::OVERLAP_INTERVAL}s, sleeps #{Config::OVERLAP_JOB_DURATION}s)")
+      ScenarioStackprof.scenario = 'overlap'
 
       setup_clean_state!
       write_overlap_schedule!
@@ -761,9 +773,11 @@ module ScenarioTest
       ]
 
       job_id = 0
-      job_plan.each do |count, klass, label|
-        count.times { klass.perform_async(job_id += 1) }
-        Log.info("enqueued #{count} #{label} jobs")
+      ScenarioStackprof.profile('enqueue', mode: :object) do
+        job_plan.each do |count, klass, label|
+          count.times { klass.perform_async(job_id += 1) }
+          Log.info("enqueued #{count} #{label} jobs")
+        end
       end
 
       duration = Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0
@@ -787,8 +801,10 @@ module ScenarioTest
       store = build_client
 
       t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      (1..Config::PERF_JOBS).each do |i|
-        CIJobs::FastJob.perform_async(i)
+      ScenarioStackprof.profile('enqueue', mode: :wall) do
+        (1..Config::PERF_JOBS).each do |i|
+          CIJobs::FastJob.perform_async(i)
+        end
       end
       duration = Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0
 

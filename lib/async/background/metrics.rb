@@ -127,9 +127,7 @@ module Async
         end
 
         def decode_workers(buffer, schema, segment, total_workers)
-          (1..total_workers).map do |worker|
-            decode_worker(buffer, schema, segment, worker)
-          end.freeze
+          (1..total_workers).map { |worker| decode_worker(buffer, schema, segment, worker) }.freeze
         end
 
         def decode_worker(buffer, schema, segment, worker)

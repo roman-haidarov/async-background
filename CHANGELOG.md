@@ -1,5 +1,91 @@
 # Changelog
 
+## 1.0.2
+
+Queue maintenance bug fix plus profiler-driven work on the hot paths that
+actually showed up in StackProf: the sqlite3 statement wrapper, transaction
+control, and the socket notifier.
+
+### Fixed
+
+- `Store#cleanup_finished_jobs` tested `@db.changes` after running *both*
+  DELETEs. `sqlite3_changes()` reports only the most recent statement, so the
+  incremental-vacuum decision saw the failed-job count alone and ignored every
+  deleted done-job. On a busy queue, where done-jobs vastly outnumber failed
+  ones, the vacuum effectively never ran and the database file grew without
+  bound. Both counts are now summed.
+- `PRAGMA incremental_vacuum` ran without a page limit, releasing every free
+  page in a single blocking call — an unbounded reactor stall proportional to
+  the accumulated free list. Now capped at 64 pages per call
+  (`SQL::INCREMENTAL_VACUUM_PAGES`).
+- `SocketWaker` signalled its notification only from the `ensure` block, so a
+  wake-up was really driven by the client disconnecting rather than by the
+  wake byte arriving. It happened to work because `SocketNotifier` closes
+  immediately after writing, but it made the protocol depend on a disconnect.
+  The signal now fires for every byte received; the `ensure` still signals so a
+  disconnect racing with a read cannot drop a wake-up.
+
+### Performance
+
+Measured on the `enqueue_stress` CI scenario (2.1M inserts / 30s, two producer
+processes). `SQLite3::Statement#step` accounts for ~82% of producer wall time
+and is irreducible; the changes below target what surrounded it.
+
+- `Store#enqueue` and `Store#fetch` bind and step their prepared statements
+  directly instead of calling `Statement#execute`. The wrapper built a splat
+  array, ran `Array#flatten` over it and allocated a `ResultSet` — roughly 8%
+  of producer wall time, and `Array#flatten` alone was 5.8% of all object
+  allocations. Behaviour is unchanged: `execute` only steps when
+  `column_count == 0`, which is exactly what the INSERT path needed, and the
+  `UPDATE ... RETURNING` fetch still consumes a single row.
+- `SocketNotifier` caches its socket paths at construction. It previously ran
+  `File.join` plus a string interpolation on every enqueue attempt —
+  13.3% of allocations in the normal scenario.
+- `SocketNotifier` remembers unreachable workers for `DEAD_WORKER_TTL` (5s)
+  instead of reconnecting to them on every enqueue. Because the scan started at
+  a random index, a dead worker was re-probed indefinitely and each attempt
+  raised and swallowed an `Errno`; `SystemCallError#initialize` alone was 6.8%
+  of allocations. A worker that starts during the TTL window is still picked up
+  by the listener's own polling fallback.
+- `SocketNotifier` rotates its scan start with a cursor rather than calling
+  `rand` per enqueue, which also spreads wake-ups deterministically.
+- `Errno::EAGAIN` on the wake byte (`IO::WaitWritable`) is now treated as
+  success rather than falling through to the generic rescue and logging a
+  warning: a full send buffer means the worker already has unread wake-ups.
+- `Store#transaction` runs `BEGIN IMMEDIATE`, `COMMIT` and `ROLLBACK` as
+  prepared statements. They previously went through `Database#execute`, which
+  compiles a fresh `Statement` and builds a `ResultSet` on every call: 26
+  allocations per BEGIN+COMMIT pair against 2 prepared, and 6x the wall time
+  over 30k pairs. Every `fetch` paid this twice, and it was 11.8% of worker
+  allocations in the object profile.
+- `mark_started!`, `complete`, `fail`, `retry_job!`, `recover`,
+  `stored_options_for`, `lease_alive?`, `next_pending_run_at` and the two
+  cleanup DELETEs now bind and step directly, like `enqueue` and `fetch`
+  already did. `Statement#execute` is gone from the Store entirely;
+  `Database#execute` remains only on the cold pragma path. This is what was
+  still leaving `Array#flatten` at 4.9% of worker allocations and
+  `Statement#execute` at 10.8% of worker wall time.
+- Combined effect on a full job cycle (enqueue omitted; fetch + mark_started +
+  complete, 8000 jobs, measured twice): **49 -> 18 allocations per job**, wall
+  time down roughly 10-20% depending on run.
+- `@db.changes` and `@db.last_insert_row_id` are read after the statement is
+  reset; both were verified to survive `sqlite3_reset()`, so the claim-token
+  lease checks behave exactly as before (valid token true, stale token false,
+  repeat completion false).
+
+### Notes
+
+- `SocketNotifier` still opens a fresh connection per notification. This is
+  the largest remaining win and it is paid on both sides: 8.5% of producer wall
+  time in the scenario where workers are actually up, plus 16.4% of worker
+  allocations, because every connection makes `SocketWaker#handle_client` spawn
+  a fresh `Async::Task` and fiber. Persistent connections require the
+  `SocketWaker` fix above to be deployed on every worker first — a 1.0.2 producer holding a connection open
+  to a 1.0.1 worker would never wake it, silently degrading queue latency to
+  the 5s poll interval. Deferred until 1.0.2 is the deployed floor.
+- No schema change; `Schema::VERSION` is untouched and 1.0.2 is a drop-in
+  replacement for 1.0.1 on an existing database.
+
 ## 1.0.1
 
 Dashboard security headers and a fiber-native rewrite of the SSE stream.
