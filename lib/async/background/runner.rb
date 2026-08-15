@@ -47,11 +47,7 @@ module Async
         @total_workers = total_workers
         @running = true
         @shutdown = ::Async::Condition.new
-        @metrics = Metrics.new(
-          worker_index: worker_index,
-          total_workers: total_workers,
-          shm_path: metrics_shm_path
-        )
+        @metrics = Metrics.new(worker_index: worker_index, total_workers: total_workers, shm_path: metrics_shm_path)
         logger.info { "Async::Background worker_index=#{worker_index}/#{total_workers}, job_count=#{job_count}" }
 
         @drain_barrier = ::Async::Barrier.new
@@ -91,7 +87,7 @@ module Async
         # continues independently in its own Async task.
         return shutdown.wait if heap.empty? && @listen_queue
 
-        loop do
+        while running?
           entry = heap.peek
           break unless entry
 
@@ -123,12 +119,7 @@ module Async
       end
 
       def dispatch_entry(entry)
-        if entry.running
-          skip_entry(entry)
-        else
-          execute_entry(entry)
-        end
-
+        entry.running ? skip_entry(entry) : execute_entry(entry)
         entry.reschedule(monotonic_now)
         heap.replace_top(entry)
       end
@@ -182,12 +173,11 @@ module Async
 
       def start_signal_watcher(task)
         task.async(transient: true) do
-          loop do
+          while running?
             @signal_r.wait_readable
             @signal_r.read_nonblock(256) rescue nil
             shutdown.signal
             @queue_waker&.signal
-            break unless running?
           end
         end
       end

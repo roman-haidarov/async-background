@@ -691,6 +691,22 @@ RSpec.describe Async::Background::Queue::Store, type: :unit do
       )
     end
 
+    it 'counts deleted done jobs even when no failed jobs were removed' do
+      n = 5
+      n.times do
+        job_id = store.enqueue('OldDone', [])
+        job = store.fetch(1)
+        store.complete(job[:id], claim_token: job[:claim_token])
+        db.execute(
+          'UPDATE jobs SET finished_at = ? WHERE id = ?',
+          [Time.now.to_f - Async::Background::Queue::Store::CLEANUP_AGE - 1, job_id]
+        )
+      end
+
+      deleted = store.send(:cleanup_finished_jobs, Time.now.to_f)
+      expect(deleted).to be >= n
+    end
+
     it 'deletes done rows by finished_at, not created_at' do
       fresh_id = store.enqueue('Fresh', [], Time.now.to_f - 99_999)
       fresh = store.fetch(1)
