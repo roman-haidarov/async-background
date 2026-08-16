@@ -13,6 +13,20 @@ module Async
         include Clock
 
         CacheEntry = Data.define(:value, :created_at)
+        RAW_COLUMNS = {'args' => :args_raw, 'options' => :options_raw}.freeze
+
+        ROW_KEYS = SQL::EXTRA_COLUMNS.to_h do |status, extra|
+          columns = SQL::BASE_COLUMNS + extra
+          [status, columns.map { |column| RAW_COLUMNS.fetch(column, column.to_sym) }.freeze]
+        end.freeze
+
+        PAGING = {
+          executing: [SQL::EXECUTING, nil, nil].freeze,
+          claimed: [SQL::CLAIMED, nil, nil].freeze,
+          done: [SQL::DONE, SQL::DONE_AFTER, %i[finished_at id].freeze].freeze,
+          failed: [SQL::FAILED, SQL::FAILED_AFTER, %i[finished_at id].freeze].freeze,
+          pending: [SQL::PENDING, SQL::PENDING_AFTER, %i[run_at id].freeze].freeze
+        }.freeze
 
         def initialize(path:, counts_cache_ttl:)
           @path = path
@@ -65,26 +79,23 @@ module Async
         end
 
         def executing(limit:)
-          read_rows(SQL::EXECUTING, [limit]).map { |row| executing_row(row) }
+          list(:executing, limit: limit)
         end
 
         def claimed(limit:)
-          read_rows(SQL::CLAIMED, [limit]).map { |row| claimed_row(row) }
+          list(:claimed, limit: limit)
         end
 
         def recent_done(limit:, cursor: nil)
-          sql, binds = terminal_query(SQL::DONE, SQL::DONE_AFTER, limit, cursor)
-          read_rows(sql, binds).map { |row| done_row(row) }
+          list(:done, limit: limit, cursor: cursor)
         end
 
         def recent_failed(limit:, cursor: nil)
-          sql, binds = terminal_query(SQL::FAILED, SQL::FAILED_AFTER, limit, cursor)
-          read_rows(sql, binds).map { |row| failed_row(row) }
+          list(:failed, limit: limit, cursor: cursor)
         end
 
         def pending(limit:, cursor: nil)
-          sql, binds = pending_query(limit, cursor)
-          read_rows(sql, binds).map { |row| pending_row(row) }
+          list(:pending, limit: limit, cursor: cursor)
         end
 
         private
@@ -103,7 +114,7 @@ module Async
         end
 
         def database_uri
-          path = URI::DEFAULT_PARSER.escape(File.expand_path(@path)).gsub('?', '%3F')
+          path = URI::RFC2396_PARSER.escape(File.expand_path(@path)).gsub('?', '%3F')
           "file:#{path}?mode=ro"
         end
 
@@ -153,10 +164,10 @@ module Async
           {
             counts: {
               executing: db.get_first_value(SQL::OVERVIEW_EXECUTING).to_i,
-              claimed:   db.get_first_value(SQL::OVERVIEW_CLAIMED).to_i,
-              pending:   db.get_first_value(SQL::OVERVIEW_PENDING).to_i,
-              done:      db.get_first_value(SQL::OVERVIEW_DONE).to_i,
-              failed:    db.get_first_value(SQL::OVERVIEW_FAILED).to_i
+              claimed: db.get_first_value(SQL::OVERVIEW_CLAIMED).to_i,
+              pending: db.get_first_value(SQL::OVERVIEW_PENDING).to_i,
+              done: db.get_first_value(SQL::OVERVIEW_DONE).to_i,
+              failed: db.get_first_value(SQL::OVERVIEW_FAILED).to_i
             }.freeze,
             next_pending_run_at: db.get_first_value(SQL::OVERVIEW_NEXT_PENDING),
             data_version: db.get_first_value(Queue::SQL::DATA_VERSION).to_i,
@@ -164,74 +175,17 @@ module Async
           }
         end
 
-        def terminal_query(first_page_sql, next_page_sql, limit, cursor)
-          return [first_page_sql, [limit]] unless cursor
-
-          [next_page_sql, [cursor.fetch(:finished_at), cursor.fetch(:id), limit]]
+        def list(status, limit:, cursor: nil)
+          sql, binds = page_query(status, limit, cursor)
+          keys = ROW_KEYS.fetch(status)
+          read_rows(sql, binds).map { |row| keys.zip(row).to_h }
         end
 
-        def pending_query(limit, cursor)
-          return [SQL::PENDING, [limit]] unless cursor
+        def page_query(status, limit, cursor)
+          first_sql, seek_sql, cursor_keys = PAGING.fetch(status)
+          return [first_sql, [limit]] unless cursor
 
-          [SQL::PENDING_AFTER, [cursor.fetch(:run_at), cursor.fetch(:id), limit]]
-        end
-
-        def executing_row(row)
-          {
-            id: row[0],
-            class_name: row[1],
-            args_raw: row[2],
-            options_raw: row[3],
-            started_at: row[4],
-            locked_by: row[5],
-            locked_at: row[6]
-          }
-        end
-
-        def claimed_row(row)
-          {
-            id: row[0],
-            class_name: row[1],
-            args_raw: row[2],
-            options_raw: row[3],
-            locked_at: row[4],
-            locked_by: row[5]
-          }
-        end
-
-        def done_row(row)
-          {
-            id: row[0],
-            class_name: row[1],
-            args_raw: row[2],
-            options_raw: row[3],
-            finished_at: row[4],
-            duration_ms: row[5]
-          }
-        end
-
-        def failed_row(row)
-          {
-            id: row[0],
-            class_name: row[1],
-            args_raw: row[2],
-            options_raw: row[3],
-            finished_at: row[4],
-            duration_ms: row[5],
-            last_error_class: row[6],
-            last_error_message: row[7]
-          }
-        end
-
-        def pending_row(row)
-          {
-            id: row[0],
-            class_name: row[1],
-            args_raw: row[2],
-            options_raw: row[3],
-            created_at: row[4],
-            run_at: row[5]
-          }
+          [seek_sql, cursor_keys.map { |key| cursor.fetch(key) } << limit]
         end
 
         def require_sqlite3

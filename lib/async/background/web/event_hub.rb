@@ -20,14 +20,13 @@ module Async
         end
 
         def current_version
-          @mutex.synchronize { raise ClosedError, 'event hub is closed' if @closed }
+          with_open {}
           @snapshot.data_version
         end
 
         def frame_for(version)
-          @mutex.synchronize do
-            raise ClosedError, 'event hub is closed' if @closed
-            return @cached_frame if @cached_version == version && @cached_frame
+          with_open do
+            next @cached_frame if @cached_version == version && @cached_frame
 
             refresh_frame_locked!
             @cached_frame
@@ -35,9 +34,7 @@ module Async
         end
 
         def initial_frame
-          @mutex.synchronize do
-            raise ClosedError, 'event hub is closed' if @closed
-
+          with_open do
             refresh_frame_locked!
             [@cached_version, @cached_frame]
           end
@@ -57,6 +54,14 @@ module Async
         end
 
         private
+
+        def with_open
+          @mutex.synchronize do
+            raise ClosedError, 'event hub is closed' if @closed
+
+            yield
+          end
+        end
 
         def refresh_frame_locked!
           overview = @snapshot.overview(force: true)

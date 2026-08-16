@@ -1,8 +1,8 @@
 # Async::Background
 
-A lightweight cron, interval, and job-queue scheduler for Ruby's
-[Async](https://github.com/socketry/async) ecosystem. Built for
-[Falcon](https://github.com/socketry/falcon), works with any Async app.
+A lightweight cron, interval, and job-queue scheduler for Ruby fibers.
+Works with any `Fiber::Scheduler` — [Falcon](https://github.com/socketry/falcon) /
+[Async](https://github.com/socketry/async), [Itsi](https://itsi.fyi), or your own.
 
 - **Cron & interval scheduling** on a single event loop with a min-heap.
 - **Dynamic job queue** backed by SQLite, with delayed jobs
@@ -15,11 +15,11 @@ A lightweight cron, interval, and job-queue scheduler for Ruby's
 
 ---
 
-## Why Async? Why fibers?
+## Why fibers?
 
-The whole gem is built around the assumption that Falcon's reactor schedules
-many fibers on top of one OS thread per process — so the dashboard's SSE
-stream, the cron scheduler, and the queue worker all share that one thread
+The whole gem is built around the assumption that the host schedules many
+fibers on top of one OS thread per process — so the dashboard's SSE stream,
+the cron scheduler, and the queue worker all share that one thread
 cooperatively. A blocked fiber yields; a blocked thread doesn't.
 
 ![Threads vs fibers under different Ruby web servers](docs/fibers-vs-threads.svg)
@@ -30,13 +30,31 @@ open tab.
 
 ---
 
+## Fiber scheduler
+
+`Runner#run` does not start a reactor. The host must install a
+`Fiber.scheduler` first:
+
+```ruby
+Async { runner.run }  # Falcon / Async
+
+require "async/background/scheduler"
+Async::Background::Scheduler.run { runner.run }  # ASYNC_BACKGROUND_SCHEDULER=async|itsi
+```
+
+Without a scheduler it raises `Runtime::SchedulerRequired`.
+Worker setup for Falcon and Itsi is in [Get started](docs/GET_STARTED.md).
+
+---
+
 ## Requirements
 
 | Dependency           | Version          | Required?            |
 | -------------------- | ---------------- | -------------------- |
 | Ruby                 | `>= 3.3`         | yes                  |
-| `async`              | `~> 2.0`         | yes                  |
+| a `Fiber::Scheduler` | `async ~> 2.0`, `itsi-scheduler`, … | yes — installed by the host, not by this gem |
 | `fugit`              | `~> 1.0`         | yes                  |
+| `console`            | `~> 1.0`         | yes                  |
 | `sqlite3`            | `~> 2.0`         | for the queue & dashboard |
 | `async-utilization`  | `>= 0.3, < 0.5`  | for metrics          |
 
@@ -48,16 +66,16 @@ open tab.
 # Gemfile
 gem "async-background"
 
-gem "sqlite3",           "~> 2.0"          # if you use the queue or dashboard
-gem "async-utilization", ">= 0.3", "< 0.5" # if you want worker metrics
+gem "async", "~> 2.0"          # or `itsi-scheduler`
+gem "sqlite3", "~> 2.0"        # queue / dashboard
+gem "async-utilization", ">= 0.3", "< 0.5"  # optional metrics
 ```
 
 ---
 
 ## ➡️ [Get started](docs/GET_STARTED.md)
 
-A four-step walkthrough: schedule config, Falcon integration, Docker, queue,
-delayed jobs.
+Schedule config, Falcon or Itsi workers, Docker, queue, delayed jobs.
 
 ---
 
@@ -120,9 +138,12 @@ jobs use wall-clock time, because "every day at 3am" needs to mean 3am.
 
 ## How it works
 
-A single Async task sleeps until the next entry is due, then dispatches it
-under a semaphore that caps concurrency. Overlapping ticks are skipped and
-rescheduled.
+A single fiber sleeps until the next entry is due, then dispatches it under a
+semaphore that caps concurrency. Overlapping ticks are skipped and rescheduled.
+Every dispatched job is tracked in a `Runtime::TaskGroup`, so shutdown drains
+in-flight work before the SQLite store and the wake-up socket are closed. The
+drain is bounded by `drain_timeout:` (30s by default; pass `nil` for the old
+unbounded wait) so one wedged job cannot turn SIGTERM into SIGKILL.
 
 ```
 schedule.yml → build_heap → MinHeap<Entry> → scheduler loop → Semaphore → run_job

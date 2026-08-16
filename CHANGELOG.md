@@ -1,5 +1,72 @@
 # Changelog
 
+## 1.1.0
+
+The gem no longer depends on `async`. The same worker runs under any
+`Fiber::Scheduler` the host installs — Falcon/Async, Itsi, or another
+implementation.
+
+### Breaking
+
+- `Runner#run` no longer starts a reactor. It needs an active
+  `Fiber.scheduler` and raises `Runtime::SchedulerRequired` without one:
+
+  ```ruby
+  Async { runner.run }                             # Falcon / Async
+  Async::Background::Scheduler.run { runner.run }  # async or itsi via ENV
+  ```
+
+- Job timeouts raise `Async::Background::Runtime::TimeoutError` instead of
+  `Async::TimeoutError`. Update rescue sites and any stored `error_class`.
+- `Runner#drain_jobs` is bounded (`drain_timeout:` default 30s). In-flight jobs
+  that outlive it are cancelled. Pass `drain_timeout: nil` for an unbounded wait.
+- `TaskGroup#stop_all(grace = nil)` returns whether the group drained, not a
+  count of cancelled tasks.
+- `Async::Background::Error` is the base class for `Runtime::Error` and
+  `ConfigError`. Both are still `StandardError`.
+
+### Added
+
+- `Async::Background::Runtime` — `Task`, `TaskGroup`, `Semaphore`,
+  `Notification`, `with_timeout`, `native_timeouts?`, `with_error_handler`.
+- `Async::Background::Scheduler` — optional bootstrap
+  (`require "async/background/scheduler"`) that installs `async` or
+  `itsi-scheduler` from `ASYNC_BACKGROUND_SCHEDULER`. `Scheduler.preload!`
+  loads the gem before fork. `Scheduler.run` on Itsi uses the current thread;
+  `ASYNC_BACKGROUND_SCHEDULER_THREAD=1` restores a dedicated thread.
+
+### Fixed
+
+- The saturated-queue wake-up fires from `TaskGroup#on_release`, after the job
+  has left `@jobs`. Signalling from the task's `ensure` left the listener
+  seeing a full group on any scheduler that resumes `unblock` immediately.
+- `Runtime.with_timeout` calls `scheduler.timeout_after` when the hook exists.
+  The `::Timeout.timeout` fallback uses `Thread#raise` and can hit the wrong
+  fiber; a missing hook now warns once per scheduler class.
+- `SocketWaker#close` stops the accept loop before the self-connect that
+  unblocks it, and hangs up tracked client sockets. A fiber parked in
+  `IO#wait_readable` is not cancellable via `Task#stop` on a scheduler without
+  `#fiber_interrupt`.
+- `Runtime.error_handler` is scoped per runner (`on_error:` /
+  `with_error_handler`). A process-global handler was overwritten by the next
+  runner and never restored.
+- A failure awaited via `Task#wait` is no longer also sent to the error handler.
+- `Semaphore.new(0)` raises `ArgumentError` instead of deadlocking on acquire.
+
+### Changed
+
+- `async` is a development dependency. Runtime gems are `console`, `fugit`
+  and `base64`.
+- `SocketWaker#start_accept_loop` no longer needs a parent task (the
+  argument is still accepted and ignored).
+- Shutdown closes the waker before the store, so the listener cannot be inside
+  `Store#fetch` when the connection disappears.
+
+### Unchanged
+
+- Dashboard, `perform_async` / `perform_in` / `perform_at`, SQLite schema,
+  and the cross-process wake protocol.
+
 ## 1.0.2
 
 Queue maintenance bug fix plus profiler-driven work on the hot paths that

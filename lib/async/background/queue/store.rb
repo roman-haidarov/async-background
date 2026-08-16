@@ -360,22 +360,26 @@ module Async
           Job::Options.new(**options)
         end
 
+        STATEMENTS = {
+          :@enqueue_stmt => SQL::INSERT_JOB,
+          :@fetch_stmt => SQL::FETCH_NEXT_JOB,
+          :@mark_started_stmt => SQL::MARK_STARTED,
+          :@complete_stmt => SQL::COMPLETE_JOB,
+          :@fail_stmt => SQL::FAIL_JOB,
+          :@retry_state_stmt => SQL::RETRY_STATE,
+          :@lease_check_stmt => SQL::LEASE_ALIVE,
+          :@retry_stmt => SQL::RETRY_JOB,
+          :@requeue_stmt => SQL::RECOVER_WORKER,
+          :@cleanup_done_stmt => SQL::CLEANUP_DONE,
+          :@cleanup_failed_stmt => SQL::CLEANUP_FAILED,
+          :@next_pending_stmt => SQL::NEXT_PENDING_RUN_AT,
+          :@begin_stmt => SQL::BEGIN_IMMEDIATE,
+          :@commit_stmt => SQL::COMMIT,
+          :@rollback_stmt => SQL::ROLLBACK
+        }.freeze
+
         def prepare_statements
-          @enqueue_stmt = @db.prepare(SQL::INSERT_JOB)
-          @fetch_stmt = @db.prepare(SQL::FETCH_NEXT_JOB)
-          @mark_started_stmt = @db.prepare(SQL::MARK_STARTED)
-          @complete_stmt = @db.prepare(SQL::COMPLETE_JOB)
-          @fail_stmt = @db.prepare(SQL::FAIL_JOB)
-          @retry_state_stmt = @db.prepare(SQL::RETRY_STATE)
-          @lease_check_stmt = @db.prepare(SQL::LEASE_ALIVE)
-          @retry_stmt = @db.prepare(SQL::RETRY_JOB)
-          @requeue_stmt = @db.prepare(SQL::RECOVER_WORKER)
-          @cleanup_done_stmt = @db.prepare(SQL::CLEANUP_DONE)
-          @cleanup_failed_stmt = @db.prepare(SQL::CLEANUP_FAILED)
-          @next_pending_stmt = @db.prepare(SQL::NEXT_PENDING_RUN_AT)
-          @begin_stmt = @db.prepare(SQL::BEGIN_IMMEDIATE)
-          @commit_stmt = @db.prepare(SQL::COMMIT)
-          @rollback_stmt = @db.prepare(SQL::ROLLBACK)
+          STATEMENTS.each { |name, sql| instance_variable_set(name, @db.prepare(sql)) }
         end
 
         def finalize_statements
@@ -384,32 +388,11 @@ module Async
         end
 
         def statements
-          [
-            @enqueue_stmt,
-            @fetch_stmt,
-            @mark_started_stmt,
-            @complete_stmt,
-            @fail_stmt,
-            @retry_state_stmt,
-            @lease_check_stmt,
-            @retry_stmt,
-            @requeue_stmt,
-            @cleanup_done_stmt,
-            @cleanup_failed_stmt,
-            @next_pending_stmt,
-            @begin_stmt,
-            @commit_stmt,
-            @rollback_stmt
-          ]
+          STATEMENTS.keys.map { |name| instance_variable_get(name) }
         end
 
         def clear_statements
-          @enqueue_stmt = @fetch_stmt = @mark_started_stmt = nil
-          @complete_stmt = @fail_stmt = @retry_state_stmt = @lease_check_stmt = nil
-          @retry_stmt = @requeue_stmt = nil
-          @cleanup_done_stmt = @cleanup_failed_stmt = nil
-          @next_pending_stmt = nil
-          @begin_stmt = @commit_stmt = @rollback_stmt = nil
+          STATEMENTS.each_key { |name| instance_variable_set(name, nil) }
         end
 
         def maybe_cleanup

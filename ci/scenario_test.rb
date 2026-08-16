@@ -29,6 +29,7 @@
 
 require 'async/background'
 require 'async/background/job'
+require 'async/background/scheduler'
 require 'async/background/queue/store'
 require 'async/background/queue/client'
 require 'console'
@@ -62,6 +63,9 @@ module ScenarioTest
 
     WORKER_STARTUP_TIMEOUT = 10
     POLL_INTERVAL          = 0.5
+    DRAIN_POLL_INTERVAL    = ENV.fetch('DRAIN_POLL_INTERVAL', '0.02').to_f
+    STRESS_DURATION        = ENV.fetch('STRESS_DURATION', '30').to_f
+    STRESS_PRODUCERS       = ENV.fetch('STRESS_PRODUCERS', '2').to_i
 
     QUEUE_DB_PATH        = File.expand_path('../tmp/ci_queue.db', __dir__)
     SOCKET_DIR           = File.expand_path('../tmp/ci_sockets', __dir__)
@@ -222,7 +226,7 @@ module ScenarioTest
         Signal.trap('TERM') { runner.stop }
         Signal.trap('INT')  { runner.stop }
 
-        runner.run
+        Async::Background::Scheduler.run { runner.run }
       end
 
       @workers << Worker.new(pid, index, nil, false)
@@ -536,9 +540,19 @@ module ScenarioTest
         Log.ok("enqueue stayed within budget: #{enqueue_duration.round(3)}s ≤ #{Config::PERF_ENQUEUE_BUDGET}s")
       end
 
+      leftover = leftover_at_drain_start
+      Log.info("at drain start: pending=#{leftover['pending']} running=#{leftover['running']} " \
+               "done=#{leftover['done']} failed=#{leftover['failed']}")
+
       drain_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      wait_for_completion(Config::PERF_JOBS, Config::PERF_DRAIN_TIMEOUT)
+      wait_for_completion(Config::PERF_JOBS, Config::PERF_DRAIN_TIMEOUT, poll: Config::DRAIN_POLL_INTERVAL)
       drain_duration = Process.clock_gettime(Process::CLOCK_MONOTONIC) - drain_start
+
+      remaining = leftover['pending'] + leftover['running']
+      leftover_rate = remaining.positive? ? (remaining / drain_duration).round(0) : 0
+      Log.ok("drain leftover: #{remaining} jobs in #{drain_duration.round(3)}s " \
+             "(#{leftover_rate} leftover jobs/s, poll #{Config::DRAIN_POLL_INTERVAL}s); " \
+             "1000/drain = #{(Config::PERF_JOBS / drain_duration).round(0)} jobs/s")
 
       drain_ceiling = [Config::PERF_JOBS / 50.0, 5.0].max
       if drain_duration > drain_ceiling
@@ -570,7 +584,9 @@ module ScenarioTest
     end
 
     def run_enqueue_stress_scenario
-      Log.header("SCENARIO 5: ENQUEUE STRESS (2 forks → 1 SQLite file, 30s)")
+      producers = [Config::STRESS_PRODUCERS, 1].max
+      duration  = Config::STRESS_DURATION
+      Log.header("SCENARIO 5: ENQUEUE STRESS (#{producers} fork(s) → 1 SQLite file, #{duration}s)")
       ScenarioStackprof.scenario = 'enqueue_stress'
 
       setup_clean_state!
@@ -580,14 +596,14 @@ module ScenarioTest
       barrier_path = File.expand_path('../tmp/ci_stress_barrier', __dir__)
       FileUtils.rm_f(barrier_path)
 
-      pipes = Array.new(2) { IO.pipe }
+      pipes = Array.new(producers) { IO.pipe }
       pids  = []
 
-      2.times do |i|
+      producers.times do |i|
         reader, writer = pipes[i]
         pid = fork do
           reader.close
-          run_stress_producer(producer_index: i, barrier_path: barrier_path, result_io: writer, duration: 30.0)
+          run_stress_producer(producer_index: i, barrier_path: barrier_path, result_io: writer, duration: duration)
         end
         writer.close
         pids << pid
@@ -595,7 +611,7 @@ module ScenarioTest
 
       sleep(0.3)
       FileUtils.touch(barrier_path)
-      Log.info("barrier released — 2 producers writing for 30s …")
+      Log.info("barrier released — #{producers} producer(s) writing for #{duration}s …")
 
       results = pipes.map.with_index do |(reader, _), i|
         raw = reader.read
@@ -618,6 +634,7 @@ module ScenarioTest
         wall       = results.map { |r| r[:duration] }.max
         per_sec    = total / wall
 
+        Log.info('(producers run without a fiber scheduler: scheduler-independent by construction)')
         Log.ok("total enqueued:       #{total}")
         Log.ok("aggregate throughput: #{per_sec.round(0)} jobs/s")
         Log.ok("wall time:            #{wall.round(2)}s")
@@ -848,7 +865,14 @@ module ScenarioTest
       end
     end
 
-    def wait_for_completion(expected_total, timeout_seconds)
+    def leftover_at_drain_start
+      inspector = QueueInspector.new(Config::QUEUE_DB_PATH)
+      inspector.counts_by_status
+    ensure
+      inspector&.close
+    end
+
+    def wait_for_completion(expected_total, timeout_seconds, poll: Config::POLL_INTERVAL)
       inspector = QueueInspector.new(Config::QUEUE_DB_PATH)
       start     = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       deadline  = start + timeout_seconds
@@ -883,7 +907,7 @@ module ScenarioTest
           return
         end
 
-        sleep(Config::POLL_INTERVAL)
+        sleep(poll)
       end
     end
 
@@ -899,5 +923,11 @@ module ScenarioTest
     end
   end
 end
+
+kind = Async::Background::Scheduler.resolve
+ScenarioTest::Log.info("fiber scheduler: #{kind}")
+
+Async::Background::Scheduler.preload!(kind)
+ScenarioTest::Log.info("scheduler preloaded before fork: #{kind}")
 
 ScenarioTest::Runner.run_all!

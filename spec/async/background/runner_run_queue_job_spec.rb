@@ -80,7 +80,7 @@ RSpec.describe 'Async::Background::Runner#run_queue_job', type: :unit do
   let(:timeout_task) do
     Class.new do
       def with_timeout(_seconds)
-        raise ::Async::TimeoutError, 'simulated timeout'
+        raise Async::Background::Runtime::TimeoutError, 'simulated timeout'
       end
     end.new
   end
@@ -169,7 +169,7 @@ RSpec.describe 'Async::Background::Runner#run_queue_job', type: :unit do
       expect(mock_store).to receive(:retry_or_fail).
         with(100,
              claim_token: 'tok-100',
-             error_class: ::Async::TimeoutError,
+             error_class: Async::Background::Runtime::TimeoutError,
              error_message: kind_of(String),
              fallback_options: kind_of(Async::Background::Job::Options),
              duration_ms: kind_of(Integer)).and_return(:failed)

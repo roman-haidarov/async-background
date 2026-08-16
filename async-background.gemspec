@@ -8,12 +8,13 @@ Gem::Specification.new do |spec|
   spec.authors = ['Roman Hajdarov']
   spec.email   = ['romnhajdarov@gmail.com']
 
-  spec.summary     = 'Lightweight heap-based cron/interval scheduler for Async.'
-  spec.description = 'A production-grade lightweight scheduler built on top of Async. ' \
-                     'Single event loop with min-heap timer, skip-overlapping execution, ' \
-                     'jitter, monotonic clock intervals, semaphore concurrency control, ' \
-                     'and deterministic worker sharding. Designed for Falcon but works ' \
-                     'with any Async-based application.'
+  spec.summary     = 'Lightweight heap-based cron/interval scheduler for any Fiber scheduler.'
+  spec.description = 'A production-grade lightweight background job scheduler built on the ' \
+                     'Fiber::Scheduler interface itself, not on any one implementation: it ' \
+                     'runs under Async/Falcon, Itsi, or anything else that installs a ' \
+                     'scheduler. Single event loop with min-heap timer, skip-overlapping ' \
+                     'execution, jitter, monotonic clock intervals, semaphore concurrency ' \
+                     'control, and deterministic worker sharding.'
 
   spec.homepage = 'https://github.com/roman-haidarov/async-background'
   spec.license  = 'MIT'
@@ -30,15 +31,20 @@ Gem::Specification.new do |spec|
 
   spec.required_ruby_version = '>= 3.3'
 
-  spec.add_dependency 'async',   '~> 2.0'
+  # No scheduler dependency on purpose. The gem uses the Fiber::Scheduler
+  # interface (Fiber.schedule, #block/#unblock, Timeout) and requires the host
+  # to install an implementation.
   spec.add_dependency 'console', '~> 1.0'
   spec.add_dependency 'fugit',   '~> 1.0'
   spec.add_dependency 'base64',  '~> 0.2'
 
   # Optional: add to your own Gemfile if you need these features
+  #   gem 'async', '~> 2.0'                      # or any other Fiber scheduler
+  #   gem 'itsi-scheduler'                       # ... such as this one
   #   gem 'sqlite3', '~> 2.0'
   #   gem 'async-utilization', '>= 0.3', '< 0.5' # shared-memory worker metrics
 
+  spec.add_development_dependency 'async', '~> 2.0'
   spec.add_development_dependency 'rake',  '~> 13.0'
   spec.add_development_dependency 'rspec', '~> 3.12'
   spec.add_development_dependency 'rack',  '~> 3.0'

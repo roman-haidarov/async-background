@@ -13,8 +13,12 @@ module Async
         TEXT_TYPE = 'text/plain; charset=utf-8'
         JAVASCRIPT_TYPE = 'application/javascript; charset=utf-8'
         CSS_TYPE = 'text/css; charset=utf-8'
+        EVENT_STREAM_TYPE = 'text/event-stream; charset=utf-8'
+
         NO_STORE = 'no-store'
         ASSET_CACHE = 'public, max-age=31536000, immutable'
+        SSE_CACHE = 'no-cache, no-transform'
+
         BASE_SECURITY_HEADERS = {
           'x-content-type-options' => 'nosniff',
           'referrer-policy' => 'no-referrer',
@@ -34,73 +38,57 @@ module Async
             "form-action 'none'"
         ).freeze
 
-        UNAUTHORIZED_BODY = JSON.generate(error: 'unauthorized').freeze
-        NOT_FOUND_BODY = JSON.generate(error: 'not_found').freeze
-        BAD_REQUEST_BODY = JSON.generate(error: 'invalid_request').freeze
-        UNAVAILABLE_BODY = JSON.generate(error: 'service_unavailable').freeze
-        INTERNAL_ERROR_BODY = JSON.generate(error: 'internal_error').freeze
-        EVENT_STREAM_TYPE = 'text/event-stream; charset=utf-8'
+        ERRORS = {
+          unauthorized: [401, 'unauthorized'],
+          not_found: [404, 'not_found'],
+          bad_request: [400, 'invalid_request'],
+          unavailable: [503, 'service_unavailable'],
+          internal_error: [500, 'internal_error']
+        }.freeze
 
-        def sse(body)
-          [200, sse_headers, body]
+        ERROR_BODY = ERRORS.to_h { |name, (_, code)| [name, JSON.generate(error: code).freeze] }.freeze
+
+        def headers(content_type, cache_control, security = BASE_SECURITY_HEADERS)
+          {'content-type' => content_type, 'cache-control' => cache_control}.merge(security)
         end
+
+        def no_store_headers(content_type) = headers(content_type, NO_STORE)
+        def html_headers = headers(HTML_TYPE, NO_STORE, HTML_SECURITY_HEADERS)
+        def asset_headers(content_type) = headers(content_type, ASSET_CACHE)
+
+        def sse_headers
+          {
+            'content-type' => EVENT_STREAM_TYPE,
+            'cache-control' => SSE_CACHE,
+            'x-accel-buffering' => 'no'
+          }.merge(BASE_SECURITY_HEADERS)
+        end
+
+        def sse(body) = [200, sse_headers, body]
+        def html(body) = [200, html_headers, [body]]
+        def javascript(body) = [200, asset_headers(JAVASCRIPT_TYPE), [body]]
+        def stylesheet(body) = [200, asset_headers(CSS_TYPE), [body]]
 
         def json(payload, status: 200)
           [status, no_store_headers(JSON_TYPE), [JSON.generate(payload)]]
         end
 
-        def html(body)
-          [200, html_headers, [body]]
-        end
-
-        def javascript(body)
-          [200, asset_headers(JAVASCRIPT_TYPE), [body]]
-        end
-
-        def stylesheet(body)
-          [200, asset_headers(CSS_TYPE), [body]]
-        end
-
-        def unauthorized
-          [401, no_store_headers(JSON_TYPE), [UNAUTHORIZED_BODY]]
-        end
-
-        def not_found
-          [404, no_store_headers(JSON_TYPE), [NOT_FOUND_BODY]]
-        end
+        def unauthorized = error_response(:unauthorized)
+        def not_found = error_response(:not_found)
+        def unavailable = error_response(:unavailable)
+        def internal_error = error_response(:internal_error)
 
         def bad_request(message = nil)
-          body = message.nil? ? BAD_REQUEST_BODY : JSON.generate(error: 'invalid_request', message: message)
-          [400, no_store_headers(JSON_TYPE), [body]]
+          return error_response(:bad_request) if message.nil?
+
+          error_response(:bad_request, JSON.generate(error: 'invalid_request', message: message))
         end
 
-        def unavailable
-          [503, no_store_headers(JSON_TYPE), [UNAVAILABLE_BODY]]
+        def error_response(name, body = ERROR_BODY.fetch(name))
+          status = ERRORS.fetch(name).first
+          [status, no_store_headers(JSON_TYPE), [body]]
         end
-
-        def internal_error
-          [500, no_store_headers(JSON_TYPE), [INTERNAL_ERROR_BODY]]
-        end
-
-        def no_store_headers(content_type)
-          {'content-type' => content_type, 'cache-control' => NO_STORE}.merge(BASE_SECURITY_HEADERS)
-        end
-
-        def html_headers
-          {'content-type' => HTML_TYPE, 'cache-control' => NO_STORE}.merge(HTML_SECURITY_HEADERS)
-        end
-
-        def asset_headers(content_type)
-          {'content-type' => content_type, 'cache-control' => ASSET_CACHE}.merge(BASE_SECURITY_HEADERS)
-        end
-
-        def sse_headers
-          {
-            'content-type' => EVENT_STREAM_TYPE,
-            'cache-control' => 'no-cache, no-transform',
-            'x-accel-buffering' => 'no'
-          }.merge(BASE_SECURITY_HEADERS)
-        end
+        private_class_method :error_response
       end
     end
   end

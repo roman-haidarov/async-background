@@ -39,40 +39,137 @@ RSpec.describe 'Async::Background::Runner 0.7.2 fixes', type: :unit do
   end
 
   describe 'shutdown drain (P0)' do
-    it 'wires the Semaphore to a Barrier so spawned tasks become its children' do
-      barrier   = runner.instance_variable_get(:@drain_barrier)
-      semaphore = runner.semaphore
+    it 'tracks job tasks in a TaskGroup and bounds concurrency with a Semaphore' do
+      expect(runner.jobs).to be_a(Async::Background::Runtime::TaskGroup)
+      expect(runner.services).to be_a(Async::Background::Runtime::TaskGroup)
+      expect(runner.semaphore).to be_a(Async::Background::Runtime::Semaphore)
+      expect(runner.semaphore.limit).to eq(2)
+    end
 
-      expect(barrier).to be_a(::Async::Barrier)
+    it 'registers every spawned job task with the drain group' do
+      with_scheduler do
+        gate = Latch.new
 
-      sem_parent = if semaphore.respond_to?(:parent)
-        semaphore.parent
-      else
-        semaphore.instance_variable_get(:@parent)
+        2.times { runner.send(:spawn_job) { gate.wait } }
+        expect(runner.jobs.size).to eq(2)
+
+        gate.open!
+        runner.jobs.wait
+        expect(runner.jobs).to be_empty
       end
-      expect(sem_parent).to equal(barrier)
     end
 
     it 'drains all in-flight tasks before tearing down resources' do
-      Async do |task|
-        barrier = runner.instance_variable_get(:@drain_barrier)
-        notif = ::Async::Notification.new
+      with_scheduler do
+        gate = Latch.new
         finished = []
+        drained = false
 
         2.times do |i|
-          runner.semaphore.async do
-            notif.wait
+          runner.send(:spawn_job) do
+            gate.wait
             finished << i
           end
         end
 
-        task.async do
-          notif.signal
-          notif.signal
+        Async::Background::Runtime.spawn do
+          runner.send(:drain_jobs)
+          drained = true
         end
 
-        barrier.wait
+        Async::Background::Runtime.spawn { gate.open! }
+
+        runner.jobs.wait
         expect(finished.sort).to eq([0, 1])
+        expect(drained).to be(true)
+      end
+    end
+
+    it 'keeps the job dispatch loop non-blocking when every slot is taken' do
+      with_scheduler do
+        gate = Latch.new
+        started = 0
+
+        4.times do
+          runner.send(:spawn_job) do
+            started += 1
+            gate.wait
+          end
+        end
+
+        expect(runner.jobs.size).to eq(4)
+        expect(started).to eq(2)
+
+        gate.open!
+        runner.jobs.wait
+        expect(started).to eq(4)
+      end
+    end
+
+    it 'gives up on a wedged job instead of parking forever' do
+      with_scheduler do
+        bounded = Async::Background::Runner.new(
+          config_path: schedule_path, job_count: 2, worker_index: 1, total_workers: 1,
+          drain_timeout: 0.05
+        )
+
+        never = Latch.new
+        bounded.send(:spawn_job) { never.wait }
+        bounded.send(:drain_jobs)
+
+        expect(bounded.jobs).to be_empty
+      end
+    end
+
+    it 'waits indefinitely when drain_timeout is nil' do
+      with_scheduler do
+        unbounded = Async::Background::Runner.new(
+          config_path: schedule_path, job_count: 2, worker_index: 1, total_workers: 1,
+          drain_timeout: nil
+        )
+
+        gate = Latch.new
+        drained = false
+        unbounded.send(:spawn_job) { gate.wait }
+
+        Async::Background::Runtime.spawn do
+          unbounded.send(:drain_jobs)
+          drained = true
+        end
+        sleep(0.05)
+        expect(drained).to be(false)
+
+        gate.open!
+        unbounded.jobs.wait
+        sleep(0.01)
+        expect(drained).to be(true)
+      end
+    end
+
+    it 'does not claim more queue rows than the semaphore can run' do
+      with_scheduler do
+        pending = Array.new(8) do |i|
+          {id: i, class_name: 'DrainSpec_Job', claim_token: 't', args: [], options: {}}
+        end
+        fetched = 0
+        store = instance_double('Async::Background::Queue::Store')
+        allow(store).to receive(:fetch) do
+          fetched += 1
+          pending.shift
+        end
+        runner.instance_variable_set(:@queue_store, store)
+
+        gate = Latch.new
+        allow(runner).to receive(:run_queue_job) { gate.wait }
+
+        runner.send(:dispatch_available_queue_jobs)
+
+        expect(fetched).to eq(2)
+        expect(runner.jobs.size).to eq(2)
+        expect(pending.size).to eq(6)
+
+        gate.open!
+        runner.jobs.wait
       end
     end
   end
