@@ -13,6 +13,9 @@ require_relative '../lib/async/background'
 # silently allow stale method names in mocks.
 require_relative '../lib/async/background/queue/notifier'
 
+require_relative 'support/scheduler'
+require_relative 'support/latch'
+
 RSpec.configure do |config|
   config.expect_with :rspec do |expectations|
     expectations.include_chain_clauses_in_custom_matcher_descriptions = true
@@ -29,9 +32,11 @@ RSpec.configure do |config|
 
   config.around(:each) do |example|
     @temp_files = []
+    @temp_dirs = []
     example.run
   ensure
     @temp_files&.each { |path| FileUtils.rm_f(path) }
+    @temp_dirs&.each { |path| FileUtils.rm_rf(path) }
   end
 
   config.define_derived_metadata do |meta|
@@ -40,6 +45,8 @@ RSpec.configure do |config|
 end
 
 module SpecHelpers
+  UNIX_SOCKET_TMP = '/tmp'
+
   def temp_db_path
     tempfile = Tempfile.new(['test_db', '.sqlite3'])
     path = tempfile.path
@@ -59,6 +66,17 @@ module SpecHelpers
     @temp_files ||= []
     @temp_files << path
     path
+  end
+
+  def temp_socket_dir
+    dir = Dir.mktmpdir('ab', UNIX_SOCKET_TMP)
+    @temp_dirs ||= []
+    @temp_dirs << dir
+    dir
+  end
+
+  def temp_socket_path
+    File.join(temp_socket_dir, 'w.sock')
   end
 end
 

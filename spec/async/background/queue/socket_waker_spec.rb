@@ -2,25 +2,20 @@
 
 require 'spec_helper'
 require 'socket'
-require 'async'
 require 'async/background/queue/socket_waker'
 
 RSpec.describe Async::Background::Queue::SocketWaker, type: :unit do
-  let(:path) do
-    sock = temp_file_path('.sock')
-    File.unlink(sock) if File.exist?(sock)
-    sock
-  end
+  let(:path) { temp_socket_path }
 
   it 'signals when a wake byte arrives, not only when the client disconnects' do
     waker = described_class.new(path)
     waker.open!
     elapsed = nil
 
-    Async do |task|
-      waker.start_accept_loop(task)
+    with_scheduler do
+      waker.start_accept_loop
 
-      waiter = task.async { waker.wait(timeout: 2.0) }
+      waiter = Async::Background::Runtime.spawn { waker.wait(timeout: 2.0) }
       client = UNIXSocket.new(path)
       begin
         client.write("\x01")

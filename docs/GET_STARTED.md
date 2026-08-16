@@ -1,10 +1,11 @@
 # Get started
 
-A walkthrough from zero to a running Falcon app with cron jobs, a dynamic
-queue, and an optional read-only dashboard.
+A walkthrough from zero to a running app with cron jobs, a dynamic queue,
+and an optional read-only dashboard. Web can sit on Falcon or Itsi;
+background workers are separate processes either way.
 
 1. [Define your jobs](#step-1--define-your-jobs)
-2. [Configure Falcon](#step-2--configure-falcon)
+2. [Run web and workers](#step-2--run-web-and-workers)
 3. [Mount the optional dashboard](#step-25--mount-the-optional-dashboard)
 4. [Docker setup](#step-3--docker-setup)
 5. [Use the queue](#step-4--use-the-queue)
@@ -77,12 +78,65 @@ The full list of retry knobs is in [Step 4 → Retries](#retries-queue-jobs-only
 
 &nbsp;
 
-## Step 2 — Configure Falcon
+## Step 2 — Run web and workers
 
-A single `falcon.rb` defines three things: the web server, the background
-scheduler, and how web workers enqueue into the same SQLite queue.
+Web processes only enqueue. Background workers run `Runner#run` under a
+`Fiber.scheduler`. Falcon can supervise workers as extra services next to
+its rack process. Itsi is a preforking HTTP server — it does not supervise
+background processes — so workers are their own OS processes with
+`Itsi::Scheduler`.
+
+Do not start `Runner#run` inside an Itsi HTTP worker (`after_fork` or a
+request thread). That process already owns the scheduler.
+
+> Schema migration belongs in the deploy release step
+> (`bin/migrate_async_background` below), **before** any web or worker
+> process starts. Don't call it from a service boot hook.
 
 ### Shared paths
+
+Read these from ENV in `falcon.rb`, `Itsi.rb`, and `bin/async_background`.
+The values must match across web and workers.
+
+```ruby
+TOTAL_BG     = ENV.fetch("BACKGROUND_FORKS", "0").to_i
+DB_PATH      = ENV.fetch("QUEUE_DB_PATH", "/app/tmp/queue/background.db")
+SOCK_DIR     = ENV.fetch("QUEUE_SOCKET_DIR", "/app/tmp/queue/sockets")
+METRICS_PATH = ENV.fetch("ASYNC_BACKGROUND_METRICS_PATH", "/app/tmp/queue/async-background.shm")
+```
+
+### Producer — install the queue client
+
+`perform_async` needs `Queue.default_client`. Install it once per process
+that enqueues, after the app boots and **after fork**.
+
+Rails: `config/initializers/async_background.rb` is enough when each
+process loads `config/environment` after fork (Falcon `container.run`,
+Itsi `after_fork`). A long-lived SQLite handle must not be inherited
+across `fork`.
+
+```ruby
+require "async/background/queue/store"
+require "async/background/queue/client"
+require "async/background/queue/socket_notifier"
+
+store = Async::Background::Queue::Store.new(path: DB_PATH)
+Async::Background::Queue.default_client = Async::Background::Queue::Client.new(
+  store:    store,
+  notifier: Async::Background::Queue::SocketNotifier.new(
+    socket_dir:    SOCK_DIR,
+    total_workers: TOTAL_BG
+  )
+)
+```
+
+Without a client, `perform_async` raises `Async::Background::Queue not configured`.
+
+### Web — Falcon (HTTP only)
+
+Use Falcon's own rack service for HTTP. Do **not** replace
+`Falcon::Environment::Rack` with `Async::Service::Generic` — Generic does
+not start an HTTP server.
 
 ```ruby
 #!/usr/bin/env -S falcon-host
@@ -91,59 +145,29 @@ scheduler, and how web workers enqueue into the same SQLite queue.
 require "falcon/environment/rack"
 require "async/service/generic"
 
-TOTAL_BG     = ENV.fetch("BACKGROUND_FORKS", 0).to_i
-DB_PATH      = ENV.fetch("QUEUE_DB_PATH",                "/app/tmp/queue/background.db")
-SOCK_DIR     = ENV.fetch("QUEUE_SOCKET_DIR",             "/app/tmp/queue/sockets")
-METRICS_PATH = ENV.fetch("ASYNC_BACKGROUND_METRICS_PATH","/app/tmp/queue/async-background.shm")
-```
+TOTAL_BG     = ENV.fetch("BACKGROUND_FORKS", "0").to_i
+DB_PATH      = ENV.fetch("QUEUE_DB_PATH", "/app/tmp/queue/background.db")
+SOCK_DIR     = ENV.fetch("QUEUE_SOCKET_DIR", "/app/tmp/queue/sockets")
+METRICS_PATH = ENV.fetch("ASYNC_BACKGROUND_METRICS_PATH", "/app/tmp/queue/async-background.shm")
 
-> Schema migration belongs in the deploy release step (`bin/migrate_async_background`
-> below), **before** this supervisor starts any web or scheduler process.
-> Don't call it from inside a service.
-
-### Web service — Falcon + producer
-
-```ruby
 service "web" do
   include Falcon::Environment::Rack
 
   count ENV.fetch("FORKS", 1).to_i
+  # rackup_path defaults to ./config.ru
 
   endpoint do
     Async::HTTP::Endpoint.parse(
       "http://#{ENV.fetch('APP_HOST', '0.0.0.0')}:#{ENV.fetch('APP_PORT', 3000)}"
     )
   end
-
-  service_class do
-    Class.new(Async::Service::Generic) do
-      def setup(container)
-        require "async/background/queue/store"
-        require "async/background/queue/client"
-        require "async/background/queue/socket_notifier"
-
-        container.run(count: ENV.fetch("FORKS", 1).to_i) do |instance|
-          require_relative "config/environment"
-
-          store = Async::Background::Queue::Store.new(path: DB_PATH)
-          Async::Background::Queue.default_client = Async::Background::Queue::Client.new(
-            store:    store,
-            notifier: Async::Background::Queue::SocketNotifier.new(
-              socket_dir:    SOCK_DIR,
-              total_workers: TOTAL_BG
-            )
-          )
-
-          instance.ready!
-          # … start Falcon HTTP server …
-        end
-      end
-    end
-  end
 end
 ```
 
-### Background service — scheduler + consumer
+Wire the producer in the initializer (or at the top of `config.ru` after
+the app is loaded). Falcon already has an Async reactor in that process.
+
+### Background — Falcon (consumer)
 
 ```ruby
 if TOTAL_BG > 0
@@ -151,10 +175,6 @@ if TOTAL_BG > 0
     service_class do
       Class.new(Async::Service::Generic) do
         def setup(container)
-          require "async/background/queue/store"
-          require "async/background/queue/client"
-          require "async/background/queue/socket_notifier"
-
           TOTAL_BG.times do |i|
             container.run(count: 1, restart: true) do |instance|
               require_relative "config/environment"
@@ -163,15 +183,16 @@ if TOTAL_BG > 0
               instance.ready!
 
               runner = Async::Background::Runner.new(
-                config_path:     Rails.root.join("config/schedule.yml"),
-                job_count:       ENV.fetch("LIMIT_JOB_COUNT", 2).to_i,
-                worker_index:    i + 1,
-                total_workers:   TOTAL_BG,
+                config_path:      Rails.root.join("config/schedule.yml"),
+                job_count:        ENV.fetch("LIMIT_JOB_COUNT", "2").to_i,
+                worker_index:     i + 1,
+                total_workers:    TOTAL_BG,
                 queue_socket_dir: SOCK_DIR,
                 queue_db_path:    DB_PATH,
                 metrics_shm_path: METRICS_PATH
               )
 
+              # Optional: workers that also enqueue.
               Async::Background::Queue.default_client = Async::Background::Queue::Client.new(
                 store:    runner.queue_store,
                 notifier: Async::Background::Queue::SocketNotifier.new(
@@ -180,7 +201,7 @@ if TOTAL_BG > 0
                 )
               )
 
-              runner.run
+              Async { runner.run }
             end
           end
         end
@@ -189,6 +210,112 @@ if TOTAL_BG > 0
   end
 end
 ```
+
+`queue_socket_dir` is what turns the queue listener on. Without it the
+process only runs `schedule.yml`. `drain_timeout:` defaults to 30s; pass
+`nil` for an unbounded shutdown wait.
+
+### Itsi — HTTP server + separate worker processes
+
+Itsi is a [preforking HTTP server](https://itsi.fyi/options/workers/).
+`workers N` are request processes. [`fiber_scheduler true`](https://itsi.fyi/options/fiber_scheduler/)
+puts `Itsi::Scheduler` on those request threads. There is no Falcon-style
+`service "scheduler"`. [`after_fork`](https://itsi.fyi/options/after_fork/)
+is the place to install the **producer**, not `Runner#run`.
+
+Workers need `itsi-scheduler`. The full `itsi` gem is only for the HTTP
+server.
+
+```ruby
+# Gemfile
+gem "itsi"             # web process
+gem "itsi-scheduler"   # worker processes (can be the same bundle)
+gem "sqlite3", "~> 2.0"
+```
+
+#### Web — Itsi.rb (producer only)
+
+```ruby
+# Itsi.rb
+fiber_scheduler true
+workers ENV.fetch("FORKS", "1").to_i
+bind "http://0.0.0.0:#{ENV.fetch('APP_PORT', 3000)}"
+rackup_file "config.ru"
+
+after_fork do
+  require_relative "config/environment"
+  require "async/background/queue/store"
+  require "async/background/queue/client"
+  require "async/background/queue/socket_notifier"
+
+  total    = ENV.fetch("BACKGROUND_FORKS", "0").to_i
+  db_path  = ENV.fetch("QUEUE_DB_PATH", "/app/tmp/queue/background.db")
+  sock_dir = ENV.fetch("QUEUE_SOCKET_DIR", "/app/tmp/queue/sockets")
+
+  store = Async::Background::Queue::Store.new(path: db_path)
+  Async::Background::Queue.default_client = Async::Background::Queue::Client.new(
+    store:    store,
+    notifier: Async::Background::Queue::SocketNotifier.new(
+      socket_dir:    sock_dir,
+      total_workers: total
+    )
+  )
+end
+```
+
+Itsi picks up `config.ru` if `Itsi.rb` is omitted; you need this file once
+`after_fork` has to wire the queue client.
+
+#### Workers — dedicated processes
+
+Each consumer is its own process with a unique `WORKER_INDEX` in
+`1..BACKGROUND_FORKS`. `Scheduler.run` installs `Itsi::Scheduler` on the
+current thread. Set `ASYNC_BACKGROUND_SCHEDULER_THREAD=1` to run it on a
+dedicated thread instead. If both `async` and `itsi-scheduler` are in the
+bundle, `auto` picks `async` — Itsi workers must set the ENV:
+
+```ruby
+# bin/async_background
+require_relative "../config/environment"
+require "async/background"
+require "async/background/scheduler"
+
+index = Integer(ENV.fetch("WORKER_INDEX"))
+total = Integer(ENV.fetch("BACKGROUND_FORKS"))
+db_path      = ENV.fetch("QUEUE_DB_PATH", "/app/tmp/queue/background.db")
+sock_dir     = ENV.fetch("QUEUE_SOCKET_DIR", "/app/tmp/queue/sockets")
+metrics_path = ENV.fetch("ASYNC_BACKGROUND_METRICS_PATH", "/app/tmp/queue/async-background.shm")
+
+runner = Async::Background::Runner.new(
+  config_path:      Rails.root.join("config/schedule.yml"),
+  job_count:        ENV.fetch("LIMIT_JOB_COUNT", "2").to_i,
+  worker_index:     index,
+  total_workers:    total,
+  queue_socket_dir: sock_dir,
+  queue_db_path:    db_path,
+  metrics_shm_path: metrics_path
+)
+
+# ASYNC_BACKGROUND_SCHEDULER=itsi
+Async::Background::Scheduler.run { runner.run }
+```
+
+`Runner#run` already traps `INT`/`TERM`. Extra `Signal.trap` in the bin
+is optional.
+
+```bash
+export QUEUE_DB_PATH=/app/tmp/queue/background.db
+export QUEUE_SOCKET_DIR=/app/tmp/queue/sockets
+export BACKGROUND_FORKS=2
+export ASYNC_BACKGROUND_SCHEDULER=itsi
+
+WORKER_INDEX=1 bundle exec ruby bin/async_background
+WORKER_INDEX=2 bundle exec ruby bin/async_background
+```
+
+Supervise those processes yourself (systemd, Docker, Kamal). Compose
+`scale` does not assign unique `WORKER_INDEX` values — declare one
+service per index, or a tiny wrapper that reads the replica slot.
 
 ### Schema migration — one-time release step
 
@@ -220,13 +347,16 @@ A recurring schedule is optional. For applications that only use
 `perform_async` / `perform_in` / `perform_at`, pass `config_path: nil`:
 
 ```ruby
-Async::Background::Runner.new(
+require "async/background/scheduler"
+
+runner = Async::Background::Runner.new(
   config_path:       nil,
   worker_index:      1,
   total_workers:     1,
   queue_db_path:     Rails.root.join("storage/async-background.sqlite3").to_s,
   queue_socket_dir:  "/tmp"
-).run
+)
+Async::Background::Scheduler.run { runner.run }
 ```
 
 A non-`nil` `config_path` stays strict: a missing or empty schedule file
@@ -241,11 +371,14 @@ recurring jobs.
 | ------------------------------- | ---------------------------------- | ------------------------------------------------------------------------ |
 | `FORKS`                         | `1`                                | Web worker processes.                                                    |
 | `BACKGROUND_FORKS`              | `0`                                | Background worker processes (`0` disables them).                         |
+| `WORKER_INDEX`                  | —                                  | This process's worker index (`1..BACKGROUND_FORKS`). Itsi workers only.  |
 | `LIMIT_JOB_COUNT`               | `2`                                | Max concurrent jobs per background worker.                               |
 | `QUEUE_DB_PATH`                 | `/app/tmp/queue/background.db`     | SQLite database path.                                                    |
 | `QUEUE_SOCKET_DIR`              | `/app/tmp/queue/sockets`           | Directory for cross-process wake-up sockets.                             |
 | `ISOLATION_FORKS`               | _empty_                            | Comma-separated worker indices excluded from queue, e.g. `1,3`.          |
 | `ASYNC_BACKGROUND_METRICS_PATH` | `/tmp/async-background.shm`        | Optional shared-memory file. Mount a common path across containers.      |
+| `ASYNC_BACKGROUND_SCHEDULER`    | `auto`                             | Used only by `Scheduler.run`: `async`, `itsi`, or `auto`. `auto` prefers `async` if both gems are present. |
+| `ASYNC_BACKGROUND_SCHEDULER_THREAD` | _empty_                        | `1` runs the itsi scheduler on a dedicated thread instead of the current one. |
 
 
 
@@ -375,7 +508,7 @@ use the host's native filesystem (ext4 / xfs / zfs) where `write()` and
 `mmap()` coherence is guaranteed.
 
 ```yaml
-# docker-compose.yml
+# docker-compose.yml — Falcon supervises web + workers in one process tree
 services:
   web:
     build: .
@@ -385,6 +518,45 @@ services:
     volumes:
       - ./my_app:/app                  # code (overlay2 — fine)
       - queue-data:/app/tmp/queue      # SQLite (ext4 — required)
+
+volumes:
+  queue-data:
+```
+
+Itsi needs a web service plus one container per worker index:
+
+```yaml
+services:
+  web:
+    command: bundle exec itsi
+    environment:
+      BACKGROUND_FORKS: "2"
+      QUEUE_DB_PATH: /app/tmp/queue/background.db
+      QUEUE_SOCKET_DIR: /app/tmp/queue/sockets
+    volumes:
+      - ./my_app:/app
+      - queue-data:/app/tmp/queue
+
+  worker-1: &worker
+    command: bundle exec ruby bin/async_background
+    environment:
+      ASYNC_BACKGROUND_SCHEDULER: itsi
+      BACKGROUND_FORKS: "2"
+      WORKER_INDEX: "1"
+      QUEUE_DB_PATH: /app/tmp/queue/background.db
+      QUEUE_SOCKET_DIR: /app/tmp/queue/sockets
+    volumes:
+      - ./my_app:/app
+      - queue-data:/app/tmp/queue
+
+  worker-2:
+    <<: *worker
+    environment:
+      ASYNC_BACKGROUND_SCHEDULER: itsi
+      BACKGROUND_FORKS: "2"
+      WORKER_INDEX: "2"
+      QUEUE_DB_PATH: /app/tmp/queue/background.db
+      QUEUE_SOCKET_DIR: /app/tmp/queue/sockets
 
 volumes:
   queue-data:
@@ -406,7 +578,7 @@ If you can't use a named volume, pass `mmap: false` to `Store.new` — see
 
 ## Step 4 — Use the queue
 
-Once jobs are defined (Step 1) and Falcon is configured (Step 2), enqueue
+Once jobs are defined (Step 1) and workers are running (Step 2), enqueue
 from anywhere:
 
 ```ruby
@@ -481,8 +653,8 @@ pending → running → done
 ```
 
 - **Recovery.** Stale `running` jobs are requeued as `pending` on worker restart.
-- **Cleanup.** Completed jobs older than 1 hour are deleted every 5 minutes
-  (piggybacked on `fetch`).
+- **Cleanup.** `done` jobs older than 1 hour are deleted every 5 minutes
+  (piggybacked on `fetch`). `failed` jobs are kept for 7 days.
 - **Polling fallback.** Wake-up over a Unix socket is the fast path. If a
   notification is missed, workers poll every 5 seconds (`QUEUE_POLL_INTERVAL`).
 - **Worker isolation.** `ISOLATION_FORKS=1,3` excludes specific workers from
@@ -507,7 +679,7 @@ Async::Background::Queue::Store.new(
   options: {
     mmap:               true,     # default: true
     synchronous:        :normal,  # default: :normal
-    wal_autocheckpoint: :auto     # default: :auto
+    wal_autocheckpoint: 1_000     # default: 1_000 (pages)
   }
 )
 ```
@@ -553,7 +725,7 @@ actually need it.
 
 | Value                | Effect                                                                                                                                |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `:auto` (default)    | SQLite's built-in default of 1000 pages. Safe and balanced for almost everyone.                                                       |
+| `1_000` (default)    | SQLite's usual 1000-page checkpoint. Safe and balanced for almost everyone. `:auto` is not accepted.                                  |
 | `100..1000`          | Frequent checkpoints. Smaller WAL, faster recovery, smoother latency, more total fsync overhead.                                      |
 | `1000..10_000`       | Rarer checkpoints. Higher peak throughput on write-heavy bursts, bigger WAL (up to ~40 MB at 10 000), occasional latency spikes.       |
 
@@ -603,24 +775,35 @@ One process, no Docker, no Rails. Define your job (Step 1), then:
 
 ```ruby
 require "async/background"
+require "async/background/queue/socket_notifier"
+require "async/background/scheduler"
+require "fileutils"
 
-store    = Async::Background::Queue::Store.new(path: "tmp/jobs.db")
+FileUtils.mkdir_p("tmp/sockets")
+
+store = Async::Background::Queue::Store.new(path: "tmp/jobs.db")
 store.ensure_database!
 
-notifier = Async::Background::Queue::Notifier.new
-client   = Async::Background::Queue::Client.new(store: store, notifier: notifier)
+Async::Background::Queue.default_client = Async::Background::Queue::Client.new(
+  store:    store,
+  notifier: Async::Background::Queue::SocketNotifier.new(
+    socket_dir:    "tmp/sockets",
+    total_workers: 1
+  )
+)
 
-Async::Background::Queue.default_client = client
-
-# Enqueue
 SendEmailJob.perform_async(123, "welcome")
 SendEmailJob.perform_in(60, 123, "reminder")
 
-# Run the worker (cron + interval jobs + queue consumer)
-Async::Background::Runner.new(
-  config_path:   "config/schedule.yml",
-  job_count:     2,
-  worker_index:  1,
-  total_workers: 1
-).run
+# queue_socket_dir turns the SQLite listener on. Without it the runner
+# only executes schedule.yml and never claims perform_async jobs.
+runner = Async::Background::Runner.new(
+  config_path:      "config/schedule.yml",
+  job_count:        2,
+  worker_index:     1,
+  total_workers:    1,
+  queue_db_path:    "tmp/jobs.db",
+  queue_socket_dir: "tmp/sockets"
+)
+Async::Background::Scheduler.run { runner.run }
 ```
