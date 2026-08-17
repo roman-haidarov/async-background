@@ -9,79 +9,73 @@ module Async
         ROLLBACK = 'ROLLBACK'.freeze
         QUERY_ONLY = 'PRAGMA query_only = ON'.freeze
         BUSY_TIMEOUT = 'PRAGMA busy_timeout = 2000'.freeze
+        BASE_COLUMNS = %w[id class_name args options].freeze
 
-        OVERVIEW_EXECUTING = "SELECT COUNT(*) FROM jobs WHERE status = 'running' AND started_at IS NOT NULL".freeze
-        OVERVIEW_CLAIMED   = "SELECT COUNT(*) FROM jobs WHERE status = 'running' AND started_at IS NULL".freeze
-        OVERVIEW_PENDING   = "SELECT COUNT(*) FROM jobs WHERE status = 'pending'".freeze
-        OVERVIEW_DONE      = "SELECT COUNT(*) FROM jobs WHERE status = 'done'".freeze
-        OVERVIEW_FAILED    = "SELECT COUNT(*) FROM jobs WHERE status = 'failed'".freeze
-        OVERVIEW_NEXT_PENDING = "SELECT MIN(run_at) FROM jobs WHERE status = 'pending'".freeze
+        STATUS_PREDICATE = {
+          executing: "status = 'running' AND started_at IS NOT NULL",
+          claimed: "status = 'running' AND started_at IS NULL",
+          pending: "status = 'pending'",
+          done: "status = 'done'",
+          failed: "status = 'failed'"
+        }.freeze
 
-        EXECUTING = <<~SQL.freeze
-          SELECT id, class_name, args, options, started_at, locked_by, locked_at
-          FROM jobs
-          WHERE status = 'running' AND started_at IS NOT NULL
-          ORDER BY started_at, id
-          LIMIT ?
-        SQL
+        EXTRA_COLUMNS = {
+          executing: %w[started_at locked_by locked_at],
+          claimed: %w[locked_at locked_by],
+          pending: %w[created_at run_at],
+          done: %w[finished_at duration_ms],
+          failed: %w[finished_at duration_ms last_error_class last_error_message]
+        }.freeze
 
-        CLAIMED = <<~SQL.freeze
-          SELECT id, class_name, args, options, locked_at, locked_by
-          FROM jobs
-          WHERE status = 'running' AND started_at IS NULL
-          ORDER BY locked_at, id
-          LIMIT ?
-        SQL
+        KEYSET = {
+          executing: ['started_at', :asc],
+          claimed: ['locked_at', :asc],
+          pending: ['run_at', :asc],
+          done: ['finished_at', :desc],
+          failed: ['finished_at', :desc]
+        }.freeze
 
-        DONE = <<~SQL.freeze
-          SELECT id, class_name, args, options, finished_at, duration_ms
-          FROM jobs
-          WHERE status = 'done'
-          ORDER BY finished_at DESC, id DESC
-          LIMIT ?
-        SQL
+        ORDER_SQL = {asc: 'ORDER BY %<column>s, id', desc: 'ORDER BY %<column>s DESC, id DESC'}.freeze
+        SEEK_SQL = {asc: '(%<column>s, id) > (?, ?)', desc: '(%<column>s, id) < (?, ?)'}.freeze
 
-        DONE_AFTER = <<~SQL.freeze
-          SELECT id, class_name, args, options, finished_at, duration_ms
-          FROM jobs
-          WHERE status = 'done' AND (finished_at, id) < (?, ?)
-          ORDER BY finished_at DESC, id DESC
-          LIMIT ?
-        SQL
+        def self.columns_for(status)
+          (BASE_COLUMNS + EXTRA_COLUMNS.fetch(status)).join(', ')
+        end
 
-        FAILED = <<~SQL.freeze
-          SELECT id, class_name, args, options, finished_at, duration_ms,
-                 last_error_class, last_error_message
-          FROM jobs
-          WHERE status = 'failed'
-          ORDER BY finished_at DESC, id DESC
-          LIMIT ?
-        SQL
+        def self.count_query(status)
+          "SELECT COUNT(*) FROM jobs WHERE #{STATUS_PREDICATE.fetch(status)}".freeze
+        end
 
-        FAILED_AFTER = <<~SQL.freeze
-          SELECT id, class_name, args, options, finished_at, duration_ms,
-                 last_error_class, last_error_message
-          FROM jobs
-          WHERE status = 'failed' AND (finished_at, id) < (?, ?)
-          ORDER BY finished_at DESC, id DESC
-          LIMIT ?
-        SQL
+        def self.list_query(status, seek: false)
+          column, direction = KEYSET.fetch(status)
+          predicate = STATUS_PREDICATE.fetch(status)
+          predicate += " AND #{format(SEEK_SQL.fetch(direction), column: column)}" if seek
 
-        PENDING = <<~SQL.freeze
-          SELECT id, class_name, args, options, created_at, run_at
-          FROM jobs
-          WHERE status = 'pending'
-          ORDER BY run_at, id
-          LIMIT ?
-        SQL
+          <<~SQL.freeze
+            SELECT #{columns_for(status)}
+            FROM jobs
+            WHERE #{predicate}
+            #{format(ORDER_SQL.fetch(direction), column: column)}
+            LIMIT ?
+          SQL
+        end
 
-        PENDING_AFTER = <<~SQL.freeze
-          SELECT id, class_name, args, options, created_at, run_at
-          FROM jobs
-          WHERE status = 'pending' AND (run_at, id) > (?, ?)
-          ORDER BY run_at, id
-          LIMIT ?
-        SQL
+        OVERVIEW_EXECUTING = count_query(:executing)
+        OVERVIEW_CLAIMED = count_query(:claimed)
+        OVERVIEW_PENDING = count_query(:pending)
+        OVERVIEW_DONE = count_query(:done)
+        OVERVIEW_FAILED = count_query(:failed)
+        OVERVIEW_NEXT_PENDING = "SELECT MIN(run_at) FROM jobs WHERE #{STATUS_PREDICATE.fetch(:pending)}".freeze
+
+        EXECUTING = list_query(:executing)
+        CLAIMED = list_query(:claimed)
+        DONE = list_query(:done)
+        FAILED = list_query(:failed)
+        PENDING = list_query(:pending)
+
+        DONE_AFTER = list_query(:done, seek: true)
+        FAILED_AFTER = list_query(:failed, seek: true)
+        PENDING_AFTER = list_query(:pending, seek: true)
       end
     end
   end

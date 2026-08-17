@@ -11,16 +11,24 @@ module Async
 
         DEFAULT_TTL = 1.0
         EMPTY_WORKERS = [].freeze
-        EMPTY_TOTALS = {
-          total_runs: 0,
-          total_successes: 0,
-          total_failures: 0,
-          total_timeouts: 0,
-          total_skips: 0,
-          active_jobs: 0,
-          last_run_at: 0,
-          last_duration_ms: nil
-        }.freeze
+        SUMMED_FIELDS = %i[
+          total_runs
+          total_successes
+          total_failures
+          total_timeouts
+          total_skips
+          active_jobs
+        ].freeze
+
+        LATEST_FIELD = :last_run_at
+        LATEST_COMPANION = :last_duration_ms
+
+        EMPTY_TOTALS = (
+          SUMMED_FIELDS.to_h { |field| [field, 0] }
+            .merge(LATEST_FIELD => 0, LATEST_COMPANION => nil)
+        ).freeze
+
+        UNAVAILABLE = {available: false, workers: EMPTY_WORKERS, totals: EMPTY_TOTALS}.freeze
 
         def initialize(path:, total_workers:, ttl: DEFAULT_TTL)
           @path = path
@@ -57,37 +65,23 @@ module Async
           unavailable
         end
 
-        def unavailable
-          {available: false, workers: EMPTY_WORKERS, totals: EMPTY_TOTALS}
-        end
+        def unavailable = UNAVAILABLE
 
         def aggregate(workers)
-          totals = {
-            total_runs: 0,
-            total_successes: 0,
-            total_failures: 0,
-            total_timeouts: 0,
-            total_skips: 0,
-            active_jobs: 0,
-            last_run_at: 0,
-            last_duration_ms: nil
-          }
+          totals = EMPTY_TOTALS.dup
+          most_recent = nil
 
           workers.each do |worker|
-            totals[:total_runs] += worker[:total_runs].to_i
-            totals[:total_successes] += worker[:total_successes].to_i
-            totals[:total_failures] += worker[:total_failures].to_i
-            totals[:total_timeouts] += worker[:total_timeouts].to_i
-            totals[:total_skips] += worker[:total_skips].to_i
-            totals[:active_jobs] += worker[:active_jobs].to_i
+            SUMMED_FIELDS.each { |field| totals[field] += worker[field].to_i }
 
-            last_run_at = worker[:last_run_at].to_i
-            next unless last_run_at > totals[:last_run_at]
+            last_run_at = worker[LATEST_FIELD].to_i
+            next unless last_run_at > totals[LATEST_FIELD]
 
-            totals[:last_run_at] = last_run_at
-            totals[:last_duration_ms] = worker[:last_duration_ms]
+            totals[LATEST_FIELD] = last_run_at
+            most_recent = worker
           end
 
+          totals[LATEST_COMPANION] = most_recent[LATEST_COMPANION] if most_recent
           totals.freeze
         end
       end

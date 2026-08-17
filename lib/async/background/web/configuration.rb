@@ -53,18 +53,47 @@ module Async
           @logger = nil
         end
 
+        RULES = [
+          [:queue_path, ->(value, _) { !value.nil? && !value.to_s.empty? }, 'queue_path must be set'],
+          [:auth, ->(value, _) { !value.nil? }, 'auth must be configured (gem ships no permissive default)'],
+          [:auth, ->(value, _) { value.respond_to?(:call) },
+            'auth must respond to #call(env) and return truthy on success'],
+          [:list_limit, ->(value, _) { value.is_a?(Integer) && value.between?(1, MAX_LIST_LIMIT) },
+            "list_limit must be an Integer between 1 and #{MAX_LIST_LIMIT}"],
+          [:counts_cache_ttl, ->(value, _) { value.is_a?(Numeric) && value >= 0 },
+            'counts_cache_ttl must be a non-negative Numeric'],
+          [:poll_interval_ms, ->(value, _) { value.is_a?(Integer) && value >= 200 },
+            'poll_interval_ms must be an Integer >= 200'],
+          [:transport, ->(value, _) { TRANSPORTS.include?(value) },
+            "transport must be one of #{TRANSPORTS.inspect}"],
+          [:stream_poll_seconds, ->(value, _) { value.is_a?(Numeric) && value >= 0.1 },
+            'stream_poll_seconds must be a Numeric >= 0.1'],
+          [:stream_heartbeat_seconds, ->(value, _) { value.is_a?(Numeric) && value >= 5 },
+            'stream_heartbeat_seconds must be a Numeric >= 5'],
+          [:stream_retry_ms, ->(value, _) { value.is_a?(Integer) && value >= 500 },
+            'stream_retry_ms must be an Integer >= 500'],
+          [:redact_args, ->(value, config) { !config.expose_args || value.nil? || value.respond_to?(:call) },
+            'redact_args must respond to #call(args)'],
+          [:total_workers, ->(value, config) {
+            !config.metrics_enabled? || (value.is_a?(Integer) && value.positive?)
+          }, 'metrics_path requires total_workers to be a positive Integer'],
+          [:mount_path, ->(value, _) { value.is_a?(String) }, 'mount_path must be a String'],
+          [:mount_path, ->(value, _) { value.empty? || value.start_with?('/') },
+            'mount_path must start with "/" or be empty'],
+          [:mount_path, ->(value, _) { value.empty? || !value.end_with?('/') },
+            'mount_path must not end with "/"'],
+          [:mount_path, ->(value, _) { value.empty? || !value.match?(/[[:cntrl:]]/) },
+            'mount_path must not contain control characters'],
+          [:mount_path, ->(value, _) { value.empty? || !value.match?(/\s/) },
+            'mount_path must not contain whitespace'],
+          [:logger, ->(value, _) { value.nil? || (value.respond_to?(:warn) && value.respond_to?(:error)) },
+            'logger must respond to #warn and #error']
+        ].freeze
+
         def validate!
-          validate_queue_path!
-          validate_auth!
-          validate_list_limit!
-          validate_cache_ttl!
-          validate_poll_interval!
-          validate_transport!
-          validate_stream!
-          validate_redactor!
-          validate_metrics!
-          validate_mount_path!
-          validate_logger!
+          RULES.each do |attribute, valid, message|
+            raise ConfigurationError, message unless valid.call(public_send(attribute), self)
+          end
           self
         end
 
@@ -83,88 +112,6 @@ module Async
 
         def metrics_enabled?
           !metrics_path.nil?
-        end
-
-        private
-
-        def validate_queue_path!
-          raise ConfigurationError, 'queue_path must be set' if queue_path.nil? || queue_path.to_s.empty?
-        end
-
-        def validate_auth!
-          raise ConfigurationError, 'auth must be configured (gem ships no permissive default)' if auth.nil?
-
-          return if auth.respond_to?(:call)
-
-          raise ConfigurationError, 'auth must respond to #call(env) and return truthy on success'
-        end
-
-        def validate_list_limit!
-          return if list_limit.is_a?(Integer) && list_limit.between?(1, MAX_LIST_LIMIT)
-
-          raise ConfigurationError, "list_limit must be an Integer between 1 and #{MAX_LIST_LIMIT}"
-        end
-
-        def validate_cache_ttl!
-          return if counts_cache_ttl.is_a?(Numeric) && counts_cache_ttl >= 0
-
-          raise ConfigurationError, 'counts_cache_ttl must be a non-negative Numeric'
-        end
-
-        def validate_poll_interval!
-          return if poll_interval_ms.is_a?(Integer) && poll_interval_ms >= 200
-
-          raise ConfigurationError, 'poll_interval_ms must be an Integer >= 200'
-        end
-
-        def validate_transport!
-          return if TRANSPORTS.include?(transport)
-
-          raise ConfigurationError, "transport must be one of #{TRANSPORTS.inspect}"
-        end
-
-        def validate_stream!
-          unless stream_poll_seconds.is_a?(Numeric) && stream_poll_seconds >= 0.1
-            raise ConfigurationError, 'stream_poll_seconds must be a Numeric >= 0.1'
-          end
-
-          unless stream_heartbeat_seconds.is_a?(Numeric) && stream_heartbeat_seconds >= 5
-            raise ConfigurationError, 'stream_heartbeat_seconds must be a Numeric >= 5'
-          end
-
-          return if stream_retry_ms.is_a?(Integer) && stream_retry_ms >= 500
-
-          raise ConfigurationError, 'stream_retry_ms must be an Integer >= 500'
-        end
-
-        def validate_redactor!
-          return unless expose_args && redact_args && !redact_args.respond_to?(:call)
-
-          raise ConfigurationError, 'redact_args must respond to #call(args)'
-        end
-
-        def validate_metrics!
-          return unless metrics_enabled?
-          return if total_workers.is_a?(Integer) && total_workers.positive?
-
-          raise ConfigurationError, 'metrics_path requires total_workers to be a positive Integer'
-        end
-
-        def validate_mount_path!
-          raise ConfigurationError, 'mount_path must be a String' unless mount_path.is_a?(String)
-          return if mount_path.empty?
-
-          raise ConfigurationError, 'mount_path must start with "/" or be empty' unless mount_path.start_with?('/')
-          raise ConfigurationError, 'mount_path must not end with "/"' if mount_path.end_with?('/')
-          raise ConfigurationError, 'mount_path must not contain control characters' if mount_path.match?(/[[:cntrl:]]/)
-          raise ConfigurationError, 'mount_path must not contain whitespace' if mount_path.match?(/\s/)
-        end
-
-        def validate_logger!
-          return if logger.nil?
-          return if logger.respond_to?(:warn) && logger.respond_to?(:error)
-
-          raise ConfigurationError, 'logger must respond to #warn and #error'
         end
       end
     end

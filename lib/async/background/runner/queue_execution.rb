@@ -9,6 +9,7 @@ module Async
         private
 
         def setup_queue(queue_socket_dir, queue_db_path, queue_mmap)
+          @queue_saturated = false
           @listen_queue = !!queue_socket_dir && !isolated_worker?
           return unless @listen_queue
 
@@ -26,20 +27,36 @@ module Async
           recover_queue_jobs
         end
 
-        def start_queue_listener(task)
-          @queue_waker.start_accept_loop(task)
+        def start_queue_listener
+          @queue_waker.start_accept_loop
 
-          task.async do
+          @services.spawn(name: 'queue-listener') do
             logger.info { "Async::Background queue: listening on worker #{worker_index}" }
 
+            failures = 0
+
             while running?
-              @queue_waker.wait(timeout: next_wait_timeout)
-              dispatch_available_queue_jobs
+              begin
+                @queue_waker.wait(timeout: next_wait_timeout)
+                break unless running?
+
+                dispatch_available_queue_jobs
+                failures = 0
+              rescue StandardError => error
+                failures += 1
+                backoff = [QUEUE_ERROR_BACKOFF * failures, QUEUE_POLL_INTERVAL].min
+                logger.error('Async::Background') do
+                  "queue listener: #{error.class} #{error.message}; retrying in #{backoff}s"
+                end
+                shutdown.wait(backoff)
+              end
             end
           end
         end
 
         def next_wait_timeout
+          return QUEUE_POLL_INTERVAL if @queue_saturated
+
           next_due = @queue_store.next_pending_run_at
           return QUEUE_POLL_INTERVAL unless next_due
 
@@ -68,7 +85,7 @@ module Async
           complete_queue_job!(job, class_name, claim_token, started_at)
         rescue ConfigError => error
           record_invalid_queue_job!(job, class_name, claim_token, error)
-        rescue ::Async::TimeoutError => error
+        rescue Runtime::TimeoutError => error
           handle_queue_failure(
             job,
             options,
@@ -129,11 +146,18 @@ module Async
         end
 
         def dispatch_available_queue_jobs
-          while running?
-            job = @queue_store.fetch(worker_index)
-            break unless job
+          @queue_saturated = false
 
-            semaphore.async { |job_task| run_queue_job(job_task, job) }
+          while running?
+            if @jobs.size >= @semaphore.limit
+              @queue_saturated = true
+              return
+            end
+
+            job = @queue_store.fetch(worker_index)
+            return if job.nil?
+
+            spawn_job { |job_task| run_queue_job(job_task, job) }
           end
         end
 

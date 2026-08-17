@@ -32,6 +32,14 @@ module Async
 
         private
 
+        LIST_ROUTES = {
+          executing: [:executing, :executing, nil].freeze,
+          claimed: [:claimed, :claimed, nil].freeze,
+          done: [:recent_done, :done, :finished_cursor].freeze,
+          failed: [:recent_failed, :failed, :finished_cursor].freeze,
+          pending: [:pending, :pending, :pending_cursor].freeze
+        }.freeze
+
         def handle(env, head:)
           return Response.unauthorized unless @auth.authorized?(env)
 
@@ -68,16 +76,13 @@ module Async
         end
 
         def dispatch(route, env)
+          return list_response(route, env) if LIST_ROUTES.key?(route)
+
           case route
           when :index then Response.html(Assets.render_index(@config))
           when :javascript then Response.javascript(Assets::JS)
           when :stylesheet then Response.stylesheet(Assets::CSS)
           when :overview then overview_response
-          when :executing then in_flight_response(:executing, env)
-          when :claimed then in_flight_response(:claimed, env)
-          when :done then terminal_response(:done, env)
-          when :failed then terminal_response(:failed, env)
-          when :pending then pending_response(env)
           when :metrics then metrics_response
           when :config then config_response
           when :stream then stream_response
@@ -85,34 +90,25 @@ module Async
           end
         end
 
+        def list_response(route, env)
+          reader, shape, cursor_kind = LIST_ROUTES.fetch(route)
+          request = Request.new(env, @config)
+
+          unless cursor_kind
+            rows = @snapshot.public_send(reader, limit: request.limit)
+            return Response.json({items: @serializer.public_send(shape, rows)})
+          end
+
+          rows = @snapshot.public_send(reader, limit: request.limit, cursor: request.public_send(cursor_kind))
+          Response.json(@serializer.public_send(shape, rows))
+        end
+
         def overview_response
           Response.json(@serializer.overview(@snapshot.overview, metrics_payload))
         end
 
-        def in_flight_response(kind, env)
-          request = Request.new(env, @config)
-          rows = kind == :executing ? @snapshot.executing(limit: request.limit) : @snapshot.claimed(limit: request.limit)
-          payload = kind == :executing ? @serializer.executing(rows) : @serializer.claimed(rows)
-          Response.json({items: payload})
-        end
-
-        def terminal_response(kind, env)
-          request = Request.new(env, @config)
-          cursor = request.finished_cursor
-          rows = kind == :done ? @snapshot.recent_done(limit: request.limit, cursor: cursor) :
-            @snapshot.recent_failed(limit: request.limit, cursor: cursor)
-          payload = kind == :done ? @serializer.done(rows) : @serializer.failed(rows)
-          Response.json(payload)
-        end
-
-        def pending_response(env)
-          request = Request.new(env, @config)
-          rows = @snapshot.pending(limit: request.limit, cursor: request.pending_cursor)
-          Response.json(@serializer.pending(rows))
-        end
-
         def metrics_response
-          Response.json(metrics_payload || {available: false, workers: [], totals: MetricsReader::EMPTY_TOTALS})
+          Response.json(metrics_payload || MetricsReader::UNAVAILABLE)
         end
 
         def metrics_payload

@@ -26,97 +26,57 @@ module Async
         end
 
         def executing(rows)
-          rows.map { |row| executing_item(row) }
+          rows.map { |row| item(:executing, row) }
         end
 
         def claimed(rows)
-          rows.map { |row| claimed_item(row) }
+          rows.map { |row| item(:claimed, row) }
         end
 
         def done(rows)
-          page(rows.map { |row| done_item(row) }) { |item| Cursor.encode_finished(item[:finished_at], item[:id]) }
+          page(:done, rows)
         end
 
         def failed(rows)
-          page(rows.map { |row| failed_item(row) }) { |item| Cursor.encode_finished(item[:finished_at], item[:id]) }
+          page(:failed, rows)
         end
 
         def pending(rows)
-          page(rows.map { |row| pending_item(row) }) { |item| Cursor.encode_pending(item[:run_at], item[:id]) }
+          page(:pending, rows)
         end
 
         private
 
-        def page(items)
-          {items: items, next_cursor: items.empty? ? nil : yield(items.last)}
-        end
+        EXTRA_FIELDS = {
+          executing: %i[started_at locked_by locked_at].freeze,
+          claimed: %i[locked_at locked_by].freeze,
+          done: %i[finished_at duration_ms].freeze,
+          failed: %i[finished_at duration_ms last_error_class last_error_message].freeze,
+          pending: %i[created_at run_at].freeze
+        }.freeze
 
-        def executing_item(row)
+        CURSOR_KEY = {done: :finished_at, failed: :finished_at, pending: :run_at}.freeze
+
+        def item(kind, row)
           args, args_count = args_for(row[:args_raw])
-          {
+
+          fields = {
             id: row[:id],
             class_name: row[:class_name],
             args: args,
             args_count: args_count,
-            options: parse_options(row[:options_raw]),
-            started_at: row[:started_at],
-            locked_by: row[:locked_by],
-            locked_at: row[:locked_at]
+            options: parse_options(row[:options_raw])
           }
+          EXTRA_FIELDS.fetch(kind).each { |name| fields[name] = row[name] }
+          fields
         end
 
-        def claimed_item(row)
-          args, args_count = args_for(row[:args_raw])
-          {
-            id: row[:id],
-            class_name: row[:class_name],
-            args: args,
-            args_count: args_count,
-            options: parse_options(row[:options_raw]),
-            locked_at: row[:locked_at],
-            locked_by: row[:locked_by]
-          }
-        end
+        def page(kind, rows)
+          items = rows.map { |row| item(kind, row) }
+          last = items.last
+          cursor = last && Cursor.encode(last[CURSOR_KEY.fetch(kind)], last[:id])
 
-        def done_item(row)
-          args, args_count = args_for(row[:args_raw])
-          {
-            id: row[:id],
-            class_name: row[:class_name],
-            args: args,
-            args_count: args_count,
-            options: parse_options(row[:options_raw]),
-            finished_at: row[:finished_at],
-            duration_ms: row[:duration_ms]
-          }
-        end
-
-        def failed_item(row)
-          args, args_count = args_for(row[:args_raw])
-          {
-            id: row[:id],
-            class_name: row[:class_name],
-            args: args,
-            args_count: args_count,
-            options: parse_options(row[:options_raw]),
-            finished_at: row[:finished_at],
-            duration_ms: row[:duration_ms],
-            last_error_class: row[:last_error_class],
-            last_error_message: row[:last_error_message]
-          }
-        end
-
-        def pending_item(row)
-          args, args_count = args_for(row[:args_raw])
-          {
-            id: row[:id],
-            class_name: row[:class_name],
-            args: args,
-            args_count: args_count,
-            options: parse_options(row[:options_raw]),
-            created_at: row[:created_at],
-            run_at: row[:run_at]
-          }
+          {items: items, next_cursor: cursor}
         end
 
         def args_for(raw)

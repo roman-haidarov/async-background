@@ -7,17 +7,11 @@ require 'async/background/queue/socket_notifier'
 RSpec.describe Async::Background::Queue::SocketNotifier, type: :unit do
   let(:total_workers) { 4 }
   let(:live_worker) { 2 }
-  let(:notifier) { described_class.new(socket_dir: @socket_dir, total_workers: total_workers) }
-
-  around do |example|
-    @socket_dir = Dir.mktmpdir('async-bg-sock')
-    example.run
-  ensure
-    FileUtils.rm_rf(@socket_dir) if @socket_dir
-  end
+  let(:socket_dir) { temp_socket_dir }
+  let(:notifier) { described_class.new(socket_dir: socket_dir, total_workers: total_workers) }
 
   def socket_path(worker_index)
-    File.join(@socket_dir, "async_bg_worker_#{worker_index}.sock")
+    File.join(socket_dir, "async_bg_worker_#{worker_index}.sock")
   end
 
   def listen!(worker_index)

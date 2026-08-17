@@ -8,34 +8,23 @@ module Async
       module Cursor
         module_function
 
-        def encode_finished(finished_at, id)
-          encode(finished_at, id)
-        end
-
-        def encode_pending(run_at, id)
-          encode(run_at, id)
-        end
-
-        def decode_finished(value)
-          timestamp, id = decode(value)
-          return unless timestamp
-
-          {finished_at: timestamp, id: id}
-        end
-
-        def decode_pending(value)
-          timestamp, id = decode(value)
-          return unless timestamp
-
-          {run_at: timestamp, id: id}
-        end
-
         def encode(timestamp, id)
           return if timestamp.nil? || id.nil?
 
           Base64.urlsafe_encode64("#{Float(timestamp)}:#{Integer(id)}", padding: false)
         end
-        private_class_method :encode
+
+        def encode_finished(finished_at, id) = encode(finished_at, id)
+        def encode_pending(run_at, id) = encode(run_at, id)
+        def decode_finished(value) = decode_as(:finished_at, value)
+        def decode_pending(value) = decode_as(:run_at, value)
+
+        def decode_as(key, value)
+          timestamp, id = decode(value)
+          return unless timestamp
+
+          {key => timestamp, :id => id}
+        end
 
         def decode(value)
           return if value.nil? || value.to_s.empty?
@@ -51,7 +40,7 @@ module Async
         rescue ArgumentError, TypeError
           raise RequestError, 'invalid cursor'
         end
-        private_class_method :decode
+        private_class_method :decode, :decode_as
       end
     end
   end

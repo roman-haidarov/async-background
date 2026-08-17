@@ -29,11 +29,9 @@ module Async
 
           enable_incremental_vacuum!(db) unless jobs_table?(db)
 
-          with_migration_timeout(db) do
-            immediate_transaction(db) do
-              reject_future_version!(db)
-              upgrade!(db) unless current?(db)
-            end
+          synchronized_change(db) do
+            reject_future_version!(db)
+            upgrade!(db) unless current?(db)
           end
         end
 
@@ -41,20 +39,20 @@ module Async
           migrate!(db)
           return if dashboard_indexes_current?(db)
 
-          with_migration_timeout(db) do
-            immediate_transaction(db) do
-              create_dashboard_indexes!(db) unless dashboard_indexes_current?(db)
-            end
+          synchronized_change(db) do
+            create_dashboard_indexes!(db) unless dashboard_indexes_current?(db)
           end
+        end
+
+        def synchronized_change(db, &change)
+          with_migration_timeout(db) { immediate_transaction(db, &change) }
         end
 
         def current?(db)
           jobs_table?(db) && version(db) == VERSION && core_indexes_current?(db)
         end
 
-        def dashboard_indexes_current?(db)
-          (DASHBOARD_INDEXES - index_names(db)).empty?
-        end
+        def dashboard_indexes_current?(db) = indexes_present?(db, DASHBOARD_INDEXES)
 
         def version(db)
           db.get_first_value(SQL::USER_VERSION).to_i
@@ -101,8 +99,10 @@ module Async
           SQL::CREATE_DASHBOARD_INDEXES.each { |statement| db.execute(statement) }
         end
 
-        def core_indexes_current?(db)
-          (CORE_INDEXES - index_names(db)).empty?
+        def core_indexes_current?(db) = indexes_present?(db, CORE_INDEXES)
+
+        def indexes_present?(db, names)
+          (names - index_names(db)).empty?
         end
 
         def jobs_table?(db)

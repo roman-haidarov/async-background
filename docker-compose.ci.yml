@@ -1,24 +1,44 @@
 version: "3.8"
+
+x-ci-build: &ci-build
+  context: .
+  dockerfile: Dockerfile.ci
+
 services:
   unit:
-    build:
-      context: .
-      dockerfile: Dockerfile.ci
+    build: *ci-build
     command: bundle exec rspec spec/ --format documentation
     environment:
       BUNDLE_GEMFILE: Gemfile.ci
+      ASYNC_BACKGROUND_SCHEDULER: "${ASYNC_BACKGROUND_SCHEDULER:-async}"
     volumes:
       - tmp-unit:/gem/tmp
     tmpfs:
       - /tmp:size=64M
 
+  unit-itsi:
+    build: *ci-build
+    command: bundle exec rspec spec/ --format documentation
+    environment:
+      BUNDLE_GEMFILE: Gemfile.ci
+      ASYNC_BACKGROUND_SCHEDULER: itsi
+    volumes:
+      - tmp-unit-itsi:/gem/tmp
+    tmpfs:
+      - /tmp:size=64M
+
+  runtime:
+    build: *ci-build
+    command: bundle exec ruby bin/verify_runtime.rb
+    environment:
+      BUNDLE_GEMFILE: Gemfile.ci
+
   scenario:
-    build:
-      context: .
-      dockerfile: Dockerfile.ci
+    build: *ci-build
     command: bundle exec ruby ci/scenario_test.rb
     environment:
       BUNDLE_GEMFILE: Gemfile.ci
+      ASYNC_BACKGROUND_SCHEDULER: "${ASYNC_BACKGROUND_SCHEDULER:-async}"
       SCENARIO_WORKERS: "3"
       SCENARIO_JOBS: "200"
       SCENARIO_TIMEOUT: "60"
@@ -27,13 +47,26 @@ services:
     tmpfs:
       - /tmp:size=64M
 
-  scenario-stackprof:
-    build:
-      context: .
-      dockerfile: Dockerfile.ci
+  scenario-itsi:
+    build: *ci-build
     command: bundle exec ruby ci/scenario_test.rb
     environment:
       BUNDLE_GEMFILE: Gemfile.ci
+      ASYNC_BACKGROUND_SCHEDULER: itsi
+      SCENARIO_WORKERS: "3"
+      SCENARIO_JOBS: "200"
+      SCENARIO_TIMEOUT: "60"
+    volumes:
+      - tmp-scenario-itsi:/gem/tmp
+    tmpfs:
+      - /tmp:size=64M
+
+  scenario-stackprof:
+    build: *ci-build
+    command: bundle exec ruby ci/scenario_test.rb
+    environment:
+      BUNDLE_GEMFILE: Gemfile.ci
+      ASYNC_BACKGROUND_SCHEDULER: "${ASYNC_BACKGROUND_SCHEDULER:-async}"
       SCENARIO_WORKERS: "3"
       SCENARIO_JOBS: "200"
       SCENARIO_TIMEOUT: "60"
@@ -46,4 +79,6 @@ services:
 
 volumes:
   tmp-unit:
+  tmp-unit-itsi:
   tmp-scenario:
+  tmp-scenario-itsi:

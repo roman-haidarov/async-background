@@ -57,7 +57,7 @@ RSpec.describe Async::Background::Runner, type: :unit do
 
   describe 'queue-only initialization' do
     it 'accepts config_path: nil when a queue listener is configured' do
-      socket_dir = Dir.mktmpdir('async-background-runner')
+      socket_dir = temp_socket_dir
       queue_path = temp_db_path
       metrics_path = temp_file_path('.shm')
       queue_only_runner = nil

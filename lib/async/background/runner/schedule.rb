@@ -59,12 +59,15 @@ module Async
         end
 
         def build_entries(schedule, now)
-          schedule.each_with_object(MinHeap.new) do |(name, config), heap|
-            next unless assigned_worker(config, name) == worker_index
+          schedule
+            .filter_map { |name, config| entry_for(name, config, now) }
+            .each_with_object(MinHeap.new) { |entry, heap| heap.push(entry) }
+        end
 
-            task = build_task_config(name, config)
-            heap.push(build_entry(name, task, now))
-          end
+        def entry_for(name, config, now)
+          return unless assigned_worker(config, name) == worker_index
+
+          build_entry(name, build_task_config(name, config), now)
         end
 
         def assigned_worker(config, name)
@@ -98,18 +101,18 @@ module Async
         end
 
         def parse_interval(name, value)
-          value&.then do |interval|
-            interval = interval.to_i
-            raise ConfigError, "[#{name}] 'every' must be > 0" unless interval.positive?
+          return if value.nil?
 
-            interval
-          end
+          interval = value.to_i
+          raise ConfigError, "[#{name}] 'every' must be > 0" unless interval.positive?
+
+          interval
         end
 
         def parse_cron(name, value)
-          value&.then do |expression|
-            Fugit::Cron.new(expression) || raise(ConfigError, "[#{name}] invalid cron: #{expression}")
-          end
+          return if value.nil?
+
+          Fugit::Cron.new(value) || raise(ConfigError, "[#{name}] invalid cron: #{value}")
         end
 
         def parse_timeout(name, config)
