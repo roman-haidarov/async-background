@@ -20,7 +20,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
 
 WORKDIR /gem
 
-COPY Gemfile Gemfile.ci async-background.gemspec ./
+COPY Gemfile Gemfile.ci Gemfile.ci.lock async-background.gemspec ./
 COPY lib/async/background/version.rb ./lib/async/background/
 RUN bundle install --gemfile=Gemfile.ci --jobs=4
 

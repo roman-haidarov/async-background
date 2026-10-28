@@ -2,6 +2,12 @@
 
 ## 1.1.1
 
+### Fixed
+
+- The CI Docker image installs dependencies from Gemfile.ci.lock before
+  copying the application, keeping build-time and runtime Bundler versions
+  consistent.
+
 ### Changed
 
 - Refactored runner lifecycle and queue execution, runtime task coordination,
