@@ -11,10 +11,10 @@ module Async
 
         def authorized?(env)
           !!@callable.call(env)
-        rescue StandardError => error
+        rescue StandardError => e
           @logger&.warn(
-            "[async-background-web] auth callable raised: " \
-            "#{error.class}: #{error.message}"
+            '[async-background-web] auth callable raised: ' \
+            "#{e.class}: #{e.message}"
           )
           false
         end

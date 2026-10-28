@@ -37,7 +37,7 @@ module Async
 
       def configuration
         @configuration or raise NotConfiguredError,
-                               'Async::Background::Web is not configured. Call Async::Background::Web.configure.'
+                                'Async::Background::Web is not configured. Call Async::Background::Web.configure.'
       end
 
       def reset!

@@ -55,7 +55,7 @@ module Async
           pending: %i[created_at run_at].freeze
         }.freeze
 
-        CURSOR_KEY = {done: :finished_at, failed: :finished_at, pending: :run_at}.freeze
+        CURSOR_KEY = { done: :finished_at, failed: :finished_at, pending: :run_at }.freeze
 
         def item(kind, row)
           args, args_count = args_for(row[:args_raw])
@@ -76,7 +76,7 @@ module Async
           last = items.last
           cursor = last && Cursor.encode(last[CURSOR_KEY.fetch(kind)], last[:id])
 
-          {items: items, next_cursor: cursor}
+          { items: items, next_cursor: cursor }
         end
 
         def args_for(raw)

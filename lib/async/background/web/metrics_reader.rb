@@ -23,12 +23,10 @@ module Async
         LATEST_FIELD = :last_run_at
         LATEST_COMPANION = :last_duration_ms
 
-        EMPTY_TOTALS = (
-          SUMMED_FIELDS.to_h { |field| [field, 0] }
-            .merge(LATEST_FIELD => 0, LATEST_COMPANION => nil)
-        ).freeze
+        EMPTY_TOTALS = SUMMED_FIELDS.to_h { |field| [field, 0] }
+                                    .merge(LATEST_FIELD => 0, LATEST_COMPANION => nil).freeze
 
-        UNAVAILABLE = {available: false, workers: EMPTY_WORKERS, totals: EMPTY_TOTALS}.freeze
+        UNAVAILABLE = { available: false, workers: EMPTY_WORKERS, totals: EMPTY_TOTALS }.freeze
 
         def initialize(path:, total_workers:, ttl: DEFAULT_TTL)
           @path = path
@@ -60,7 +58,7 @@ module Async
           return unavailable unless Metrics.available? && File.file?(@path)
 
           workers = Metrics.read_all(total_workers: @total_workers, path: @path)
-          {available: true, workers: workers, totals: aggregate(workers)}
+          { available: true, workers: workers, totals: aggregate(workers) }
         rescue StandardError
           unavailable
         end

@@ -41,7 +41,7 @@ module Async
       private
 
       def sift_up(i)
-        while i > 0
+        while i.positive?
           parent = (i - 1) >> 1
           break if @data[parent].next_run_at <= @data[i].next_run_at
 
@@ -50,20 +50,24 @@ module Async
         end
       end
 
-      def sift_down(i)
-        while true
-          smallest = i
-          left  = (i << 1) + 1
-          right = left + 1
+      def sift_down(index)
+        loop do
+          child = smallest_child(index)
+          break if child == index
 
-          smallest = left  if left < @data.size && @data[left].next_run_at < @data[smallest].next_run_at
-          smallest = right if right < @data.size && @data[right].next_run_at < @data[smallest].next_run_at
-
-          break if smallest == i
-
-          swap(i, smallest)
-          i = smallest
+          swap(index, child)
+          index = child
         end
+      end
+
+      def smallest_child(index)
+        left = (index << 1) + 1
+        right = left + 1
+        smallest = index
+
+        smallest = left if left < @data.size && @data[left].next_run_at < @data[smallest].next_run_at
+        smallest = right if right < @data.size && @data[right].next_run_at < @data[smallest].next_run_at
+        smallest
       end
 
       def swap(a, b)

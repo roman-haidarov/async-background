@@ -29,53 +29,57 @@ module Async
 
         validate_worker!(worker_index, total_workers)
         initialize_registry!(worker_index, total_workers, shm_path)
-      rescue LoadError => error
-        mark_unavailable!(error)
+      rescue LoadError => e
+        mark_unavailable!(e)
       end
 
       def enabled? = @enabled
 
-      def job_started(_entry)
-        return unless enabled?
+      module JobEvents
+        def job_started(_entry)
+          return unless enabled?
 
-        increment(:total_runs)
-        increment(:active_jobs)
-        set(:last_run_at, Process.clock_gettime(Process::CLOCK_REALTIME).to_i)
+          increment(:total_runs)
+          increment(:active_jobs)
+          set(:last_run_at, Process.clock_gettime(Process::CLOCK_REALTIME).to_i)
+        end
+
+        def job_succeeded(_entry, duration)
+          return unless enabled?
+
+          increment(:total_successes)
+          set(:last_duration_ms, duration_to_milliseconds(duration))
+        end
+
+        def job_finished(entry, duration)
+          job_succeeded(entry, duration)
+          job_stopped(entry)
+        end
+
+        def job_failed(_entry, _error)
+          increment(:total_failures) if enabled?
+        end
+
+        def job_timed_out(_entry)
+          increment(:total_timeouts) if enabled?
+        end
+
+        def job_stopped(_entry)
+          decrement(:active_jobs) if enabled?
+        end
+
+        def job_skipped(_entry)
+          increment(:total_skips) if enabled?
+        end
       end
-
-      def job_succeeded(_entry, duration)
-        return unless enabled?
-
-        increment(:total_successes)
-        set(:last_duration_ms, duration_to_milliseconds(duration))
-      end
-
-      def job_finished(entry, duration)
-        job_succeeded(entry, duration)
-        job_stopped(entry)
-      end
-
-      def job_failed(_entry, _error)
-        increment(:total_failures) if enabled?
-      end
-
-      def job_timed_out(_entry)
-        increment(:total_timeouts) if enabled?
-      end
-
-      def job_stopped(_entry)
-        decrement(:active_jobs) if enabled?
-      end
-
-      def job_skipped(_entry)
-        increment(:total_skips) if enabled?
-      end
+      private_constant :JobEvents
+      include JobEvents
 
       def values
         enabled? ? registry.values : {}
       end
 
-      class << self
+      module Reader
         def available?
           load_utilization!
           true
@@ -138,6 +142,8 @@ module Async
         end
       end
 
+      extend Reader
+
       private
 
       def initialize_registry!(worker_index, total_workers, path)
@@ -145,9 +151,7 @@ module Async
         ensure_shm!(total_workers, path)
 
         @registry = ::Async::Utilization::Registry.new
-        unless @registry.respond_to?(:metric)
-          raise LoadError, 'async-utilization >= 0.3 is required for metrics'
-        end
+        raise LoadError, 'async-utilization >= 0.3 is required for metrics' unless @registry.respond_to?(:metric)
 
         attach_observer!(worker_index, path)
         @metric_handles = SCHEMA_FIELDS.keys.to_h { |name| [name, @registry.metric(name)] }.freeze
@@ -196,7 +200,11 @@ module Async
           file.flock(File::LOCK_EX)
           file.truncate(mapped_size) if file.size < mapped_size
         ensure
-          file.flock(File::LOCK_UN) rescue nil
+          begin
+            file.flock(File::LOCK_UN)
+          rescue StandardError
+            nil
+          end
         end
       end
 

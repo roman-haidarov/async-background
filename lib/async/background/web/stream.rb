@@ -26,41 +26,13 @@ module Async
           end
 
           yield frame
-          last_yield = monotonic_now
-          unavailable_announced = false
-
-          loop do
-            sleep_for_poll
-
-            begin
-              new_version = @hub.current_version
-
-              if new_version != version
-                version = new_version
-                yield @hub.frame_for(version)
-                last_yield = monotonic_now
-              elsif (monotonic_now - last_yield) >= @heartbeat_seconds
-                yield EventHub::HEARTBEAT_FRAME
-                last_yield = monotonic_now
-              end
-
-              unavailable_announced = false
-            rescue ClosedError
-              break
-            rescue UnavailableError
-              unless unavailable_announced
-                yield EventHub::UNAVAILABLE_FRAME
-                unavailable_announced = true
-                last_yield = monotonic_now
-              end
-            end
-          end
+          stream_updates(version, monotonic_now) { |event| yield event }
         rescue Errno::EPIPE, Errno::ECONNRESET, IOError
           nil
-        rescue StandardError => error
+        rescue StandardError => e
           @logger&.error(
-            "[async-background-web] SSE stream terminated: " \
-            "#{error.class}: #{error.message}"
+            '[async-background-web] SSE stream terminated: ' \
+            "#{e.class}: #{e.message}"
           )
           nil
         end
@@ -75,6 +47,54 @@ module Async
 
         def sleep_for_poll
           sleep(@poll_seconds)
+        end
+
+        def stream_updates(version, last_yield)
+          unavailable_announced = false
+          loop do
+            sleep_for_poll
+            state = next_state(version, last_yield, unavailable_announced) { |event| yield event }
+            break unless state
+
+            version, last_yield, unavailable_announced = state
+          end
+        end
+
+        def next_state(version, last_yield, unavailable_announced)
+          current_version = @hub.current_version
+          return updated_state(current_version) { |event| yield event } if current_version != version
+          return heartbeat_state(version) { |event| yield event } if heartbeat_due?(last_yield)
+
+          [version, last_yield, false]
+        rescue ClosedError
+          nil
+        rescue UnavailableError
+          announce_unavailable(version, last_yield, unavailable_announced) { |event| yield event }
+        end
+
+        def updated_state(version)
+          yield @hub.frame_for(version)
+          [version, monotonic_now, false]
+        end
+
+        def heartbeat_state(version)
+          yield EventHub::HEARTBEAT_FRAME
+          [version, monotonic_now, false]
+        end
+
+        def heartbeat_due?(last_yield)
+          (monotonic_now - last_yield) >= @heartbeat_seconds
+        end
+
+        def announce_unavailable(version, last_yield, announced)
+          return [version, last_yield, true] if announced
+
+          yield_unavailable { |event| yield event }
+          [version, monotonic_now, true]
+        end
+
+        def yield_unavailable
+          yield EventHub::UNAVAILABLE_FRAME
         end
       end
     end

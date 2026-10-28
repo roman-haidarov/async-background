@@ -6,9 +6,9 @@ module Async
       EMPTY_ARGS = [].freeze
       EMPTY_OPTIONS = {}.freeze
 
-      SYNCHRONOUS_LEVELS = {normal: 'NORMAL', full: 'FULL', extra: 'EXTRA'}.freeze
+      SYNCHRONOUS_LEVELS = { normal: 'NORMAL', full: 'FULL', extra: 'EXTRA' }.freeze
       WAL_AUTOCHECKPOINT_RANGE = 100..10_000
-      DEFAULT_STORE_OPTIONS = {mmap: true, synchronous: :normal, wal_autocheckpoint: 1_000}.freeze
+      DEFAULT_STORE_OPTIONS = { mmap: true, synchronous: :normal, wal_autocheckpoint: 1_000 }.freeze
       DEFAULTS = DEFAULT_STORE_OPTIONS
       MMAP_SIZE = 268_435_456
 
@@ -45,7 +45,7 @@ module Async
         private
 
         def validate_mmap!(value)
-          return if value == true || value == false
+          return if [true, false].include?(value)
 
           raise ArgumentError, "mmap must be true or false, got #{value.inspect}"
         end

@@ -23,24 +23,31 @@ module Async
           timestamp, id = decode(value)
           return unless timestamp
 
-          {key => timestamp, :id => id}
+          { key => timestamp, :id => id }
         end
 
         def decode(value)
           return if value.nil? || value.to_s.empty?
 
-          timestamp_raw, id_raw, extra = Base64.urlsafe_decode64(value.to_s).split(':', 3)
+          decode_fields(Base64.urlsafe_decode64(value.to_s))
+        rescue ArgumentError, TypeError
+          raise RequestError, 'invalid cursor'
+        end
+
+        def decode_fields(payload)
+          timestamp_raw, id_raw, extra = payload.split(':', 3)
           raise RequestError, 'invalid cursor' if timestamp_raw.nil? || id_raw.nil? || extra
 
           timestamp = Float(timestamp_raw)
           id = Integer(id_raw)
-          raise RequestError, 'invalid cursor' unless timestamp.finite? && id.positive?
-
+          validate_fields!(timestamp, id)
           [timestamp, id]
-        rescue ArgumentError, TypeError
-          raise RequestError, 'invalid cursor'
         end
-        private_class_method :decode, :decode_as
+
+        def validate_fields!(timestamp, id)
+          raise RequestError, 'invalid cursor' unless timestamp.finite? && id.positive?
+        end
+        private_class_method :decode, :decode_as, :decode_fields, :validate_fields!
       end
     end
   end

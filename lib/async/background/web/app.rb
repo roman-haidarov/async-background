@@ -35,9 +35,18 @@ module Async
         LIST_ROUTES = {
           executing: [:executing, :executing, nil].freeze,
           claimed: [:claimed, :claimed, nil].freeze,
-          done: [:recent_done, :done, :finished_cursor].freeze,
-          failed: [:recent_failed, :failed, :finished_cursor].freeze,
-          pending: [:pending, :pending, :pending_cursor].freeze
+          done: %i[recent_done done finished_cursor].freeze,
+          failed: %i[recent_failed failed finished_cursor].freeze,
+          pending: %i[pending pending pending_cursor].freeze
+        }.freeze
+        STATIC_ROUTES = {
+          index: :index_response,
+          javascript: :javascript_response,
+          stylesheet: :stylesheet_response,
+          overview: :overview_response,
+          metrics: :metrics_response,
+          config: :config_response,
+          stream: :stream_response
         }.freeze
 
         def handle(env, head:)
@@ -51,15 +60,15 @@ module Async
           end
 
           dispatch(route, env)
-        rescue RequestError => error
-          Response.bad_request(error.message)
+        rescue RequestError => e
+          Response.bad_request(e.message)
         rescue UnavailableError, ClosedError
           Response.unavailable
-        rescue StandardError => error
+        rescue StandardError => e
           # Do not turn internal class names, paths or database errors into an
           # unauthenticated information disclosure channel — but do surface
           # them to the operator via the configured logger.
-          log_internal_error(env, error)
+          log_internal_error(env, e)
           Response.internal_error
         end
 
@@ -78,17 +87,15 @@ module Async
         def dispatch(route, env)
           return list_response(route, env) if LIST_ROUTES.key?(route)
 
-          case route
-          when :index then Response.html(Assets.render_index(@config))
-          when :javascript then Response.javascript(Assets::JS)
-          when :stylesheet then Response.stylesheet(Assets::CSS)
-          when :overview then overview_response
-          when :metrics then metrics_response
-          when :config then config_response
-          when :stream then stream_response
-          else Response.not_found
-          end
+          handler = STATIC_ROUTES[route]
+          handler ? send(handler) : Response.not_found
         end
+
+        def index_response = Response.html(Assets.render_index(@config))
+
+        def javascript_response = Response.javascript(Assets::JS)
+
+        def stylesheet_response = Response.stylesheet(Assets::CSS)
 
         def list_response(route, env)
           reader, shape, cursor_kind = LIST_ROUTES.fetch(route)
@@ -96,7 +103,7 @@ module Async
 
           unless cursor_kind
             rows = @snapshot.public_send(reader, limit: request.limit)
-            return Response.json({items: @serializer.public_send(shape, rows)})
+            return Response.json({ items: @serializer.public_send(shape, rows) })
           end
 
           rows = @snapshot.public_send(reader, limit: request.limit, cursor: request.public_send(cursor_kind))
@@ -144,7 +151,7 @@ module Async
 
         def log_internal_error(env, error)
           @logger&.error(
-            "[async-background-web] internal error on " \
+            '[async-background-web] internal error on ' \
             "#{env['REQUEST_METHOD']} #{env['PATH_INFO']}: " \
             "#{error.class}: #{error.message}"
           )

@@ -54,10 +54,18 @@ module Async
           hang_up_clients
           stop_clients
 
-          @server&.close rescue nil
+          begin
+            @server&.close
+          rescue StandardError
+            nil
+          end
           @server = nil
           @accept_task = nil
-          File.unlink(@path) rescue nil
+          begin
+            File.unlink(@path)
+          rescue StandardError
+            nil
+          end
         end
 
         private
@@ -101,7 +109,11 @@ module Async
             Console.logger.warn(self) { "SocketWaker client handler error: #{e.class} #{e.message}" }
           ensure
             @sockets.delete(client)
-            client.close rescue nil
+            begin
+              client.close
+            rescue StandardError
+              nil
+            end
             @notification.signal_all
           end
         end
@@ -119,13 +131,17 @@ module Async
         def wake_accept_loop
           return unless @server
 
-          UNIXSocket.open(@path) { |s| s.write_nonblock("\x00") rescue nil }
+          UNIXSocket.open(@path) do |s|
+            s.write_nonblock("\x00")
+          rescue StandardError
+            nil
+          end
         rescue StandardError
           nil
         end
 
         def hang_up_clients
-          @sockets.keys.each do |socket|
+          @sockets.each_key do |socket|
             socket.close
           rescue StandardError
             nil
@@ -166,11 +182,15 @@ module Async
           return unless File.exist?(@path)
 
           begin
-            UNIXSocket.open(@path) { |s| s.close }
+            UNIXSocket.open(@path, &:close)
 
             raise "Socket #{@path} is already in use by another process (worker_index conflict?)"
           rescue Errno::ECONNREFUSED, Errno::ENOENT
-            File.unlink(@path) rescue nil
+            begin
+              File.unlink(@path)
+            rescue StandardError
+              nil
+            end
           end
         end
 

@@ -96,8 +96,8 @@ module Async
 
         def resolve_scheduled_job(name, class_name)
           resolve_job_class(class_name)
-        rescue ConfigError => error
-          raise ConfigError, "[#{name}] #{error.message}"
+        rescue ConfigError => e
+          raise ConfigError, "[#{name}] #{e.message}"
         end
 
         def parse_interval(name, value)
@@ -117,8 +117,8 @@ module Async
 
         def parse_timeout(name, config)
           Job::Options.new(timeout: config.fetch('timeout', DEFAULT_TIMEOUT)).timeout
-        rescue ArgumentError, TypeError => error
-          raise ConfigError, "[#{name}] #{error.message}"
+        rescue ArgumentError, TypeError => e
+          raise ConfigError, "[#{name}] #{e.message}"
         end
 
         def validate_schedule_frequency!(name, interval, cron)

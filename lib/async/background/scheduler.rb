@@ -32,7 +32,7 @@ module Async
 
       def run(kind = nil, &block)
         raise ArgumentError, 'block required' unless block
-        return block.call if installed?
+        return yield if installed?
 
         case resolve(kind)
         when :async then run_async(&block)
@@ -75,7 +75,7 @@ module Async
         require 'async'
 
         result = nil
-        send(:Async) { result = block.call }
+        send(:Async) { result = yield }
         result
       end
 
@@ -101,7 +101,7 @@ module Async
 
         begin
           Fiber.schedule do
-            result = block.call
+            result = yield
           rescue Exception => e # rubocop:disable Lint/RescueException
             failure = e
           ensure
@@ -130,7 +130,7 @@ module Async
         thread = Thread.new do
           Fiber.set_scheduler(scheduler_class.new)
           Fiber.schedule do
-            result = block.call
+            result = yield
           rescue Exception => e # rubocop:disable Lint/RescueException
             failure = e
           end
