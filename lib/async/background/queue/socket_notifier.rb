@@ -19,7 +19,7 @@ module Async
         ].freeze
 
         DEAD_WORKER_TTL = 5.0
-        WAKE_BYTE = "\x01".freeze
+        WAKE_BYTE = "\x01"
 
         def initialize(socket_dir:, total_workers:)
           @socket_dir = socket_dir
@@ -64,7 +64,11 @@ module Async
           begin
             socket.write_nonblock(WAKE_BYTE)
           ensure
-            socket.close rescue nil
+            begin
+              socket.close
+            rescue StandardError
+              nil
+            end
           end
           true
         rescue IO::WaitWritable
@@ -72,9 +76,15 @@ module Async
         rescue *UNAVAILABLE
           mark_dead(index, now)
           false
-        rescue => e
+        rescue StandardError => e
           mark_dead(index, now)
-          Console.logger.warn(self) { "SocketNotifier#notify_one(#{index + 1}) failed: #{e.class} #{e.message}" } rescue nil
+          begin
+            Console.logger.warn(self) do
+              "SocketNotifier#notify_one(#{index + 1}) failed: #{e.class} #{e.message}"
+            end
+          rescue StandardError
+            nil
+          end
           false
         end
 

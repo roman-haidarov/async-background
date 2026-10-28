@@ -72,8 +72,8 @@ module Async
           handler = @on_release or return
 
           handler.call(task)
-        rescue StandardError => error
-          Runtime.report_error(task, error, @on_error)
+        rescue StandardError => e
+          Runtime.report_error(task, e, @on_error)
         end
       end
     end

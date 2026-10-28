@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>%<title>s</title>
+  <link rel="stylesheet" href="%<base>s/assets/app.css?v=%<asset_version>s">
+</head>
+<body data-mount-path="%<base>s">
+  <header>
+    <h1 id="title">%<title>s</h1>
+    <span class="meta"><span id="status-dot" class="status-dot"></span><span id="meta"></span></span>
+  </header>
+  <main>
+    <section id="counts" class="counts"></section>
+    <section id="totals" class="totals"></section>
+    <nav class="tabs">
+      <button type="button" data-tab="executing" class="active">Executing <span class="badge">0</span></button>
+      <button type="button" data-tab="claimed">Claimed <span class="badge">0</span></button>
+      <button type="button" data-tab="pending">Pending <span class="badge">0</span></button>
+      <button type="button" data-tab="done">Done <span class="badge">0</span></button>
+      <button type="button" data-tab="failed">Failed <span class="badge">0</span></button>
+    </nav>
+    <section id="list"></section>
+    <section id="pagination" class="pagination"></section>
+  </main>
+  <script defer src="%<base>s/assets/app.js?v=%<asset_version>s"></script>
+</body>
+</html>

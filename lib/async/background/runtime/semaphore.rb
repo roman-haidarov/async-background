@@ -4,7 +4,7 @@ module Async
   module Background
     module Runtime
       class Semaphore
-        attr_reader :limit
+        attr_reader :limit, :available
 
         def initialize(limit)
           @limit = Integer(limit)
@@ -14,7 +14,6 @@ module Async
           @waiting = WaitList.new
         end
 
-        def available = @available
         def waiting = @waiting.size
 
         def acquire
@@ -47,17 +46,22 @@ module Async
           node = FiberNode.new(Fiber.current, self)
           @waiting.push(node)
           task&.enter_block(node.waiter)
+          wait_for_grant(node, task)
+        ensure
+          release_wait_state(node, task) if node
+        end
 
-          begin
-            until node.granted?
-              node.suspend
-              abandon_wait!(node, task) if task&.cancelled?
-            end
+        def wait_for_grant(node, task)
+          until node.granted?
+            node.suspend
             abandon_wait!(node, task) if task&.cancelled?
-          ensure
-            task&.exit_block
-            @waiting.remove(node) unless node.granted? || node.list.nil?
           end
+          abandon_wait!(node, task) if task&.cancelled?
+        end
+
+        def release_wait_state(node, task)
+          task&.exit_block
+          @waiting.remove(node) unless node.granted? || node.list.nil?
         end
 
         def abandon_wait!(node, task)
@@ -115,7 +119,7 @@ module Async
             @list = @prev = @next = nil
             @granted = false
             @scheduler = Runtime.scheduler!
-            @waiter = {fiber: fiber, scheduler: @scheduler, ready: false, blocker: blocker, queued: true}
+            @waiter = { fiber: fiber, scheduler: @scheduler, ready: false, blocker: blocker, queued: true }
           end
 
           def granted? = @granted

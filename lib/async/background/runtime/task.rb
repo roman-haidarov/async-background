@@ -29,20 +29,7 @@ module Async
           @scheduler = Runtime.scheduler!
           takes_task = !block.arity.zero?
 
-          scheduled = Fiber.schedule do
-            adopt_fiber(Fiber.current)
-            previous = Runtime.current_task
-            Runtime.current_task = self
-            begin
-              complete(takes_task ? block.call(self) : block.call, nil)
-            rescue Cancel
-              complete(nil, nil)
-            rescue Exception => e # rubocop:disable Lint/RescueException
-              complete(nil, e)
-            ensure
-              Runtime.current_task = previous
-            end
-          end
+          scheduled = Fiber.schedule { run_scheduled_task { takes_task ? yield(self) : yield } }
 
           @fiber ||= scheduled if scheduled.is_a?(Fiber)
           self
@@ -92,15 +79,28 @@ module Async
 
         private
 
+        def run_scheduled_task
+          adopt_fiber(Fiber.current)
+          previous = Runtime.current_task
+          Runtime.current_task = self
+          complete(yield, nil)
+        rescue Cancel
+          complete(nil, nil)
+        rescue Exception => e # rubocop:disable Lint/RescueException
+          complete(nil, e)
+        ensure
+          Runtime.current_task = previous
+        end
+
         def adopt_fiber(fiber)
-          @fiber ||= fiber
+          @adopt_fiber ||= fiber
         end
 
         def interrupt_fiber
           fiber = @fiber
           scheduler = @scheduler
           return false unless fiber&.alive?
-          return false unless scheduler&.respond_to?(:fiber_interrupt)
+          return false unless scheduler.respond_to?(:fiber_interrupt)
 
           result = scheduler.fiber_interrupt(fiber, Cancel.new('task stopped'))
           result != false
@@ -136,7 +136,8 @@ module Async
         def wake_waiters
           return if @waiters.nil? || @waiters.empty?
 
-          pending, @waiters = @waiters, []
+          pending = @waiters
+          @waiters = []
           pending.each { |waiter| Runtime.wake_dequeued(waiter, self) }
         end
       end

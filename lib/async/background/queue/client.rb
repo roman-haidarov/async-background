@@ -43,17 +43,20 @@ module Async
 
         def enqueue(job_class, *args, options: EMPTY_OPTIONS)
           ensure_configured!
-          default_client.push(resolve_class_name(job_class), normalized_args(args), nil, options: build_options(job_class, options))
+          default_client.push(resolve_class_name(job_class), normalized_args(args), nil,
+                              options: build_options(job_class, options))
         end
 
         def enqueue_in(delay, job_class, *args, options: EMPTY_OPTIONS)
           ensure_configured!
-          default_client.push_in(delay, resolve_class_name(job_class), normalized_args(args), options: build_options(job_class, options))
+          default_client.push_in(delay, resolve_class_name(job_class), normalized_args(args),
+                                 options: build_options(job_class, options))
         end
 
         def enqueue_at(time, job_class, *args, options: EMPTY_OPTIONS)
           ensure_configured!
-          default_client.push_at(time, resolve_class_name(job_class), normalized_args(args), options: build_options(job_class, options))
+          default_client.push_at(time, resolve_class_name(job_class), normalized_args(args),
+                                 options: build_options(job_class, options))
         end
 
         private
@@ -79,7 +82,7 @@ module Async
         end
 
         def ensure_configured!
-          raise "Async::Background::Queue not configured" unless default_client
+          raise 'Async::Background::Queue not configured' unless default_client
         end
 
         def normalized_args(args) = args.empty? ? EMPTY_ARGS : args
@@ -95,10 +98,10 @@ module Async
           return EMPTY_OPTIONS unless job_class.respond_to?(:resolve_options)
 
           options = if job_class.respond_to?(:queue_options)
-            job_class.queue_options
-          else
-            job_class.resolve_options
-          end
+                      job_class.queue_options
+                    else
+                      job_class.resolve_options
+                    end
 
           options.empty? ? EMPTY_OPTIONS : options
         end

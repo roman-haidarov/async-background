@@ -156,7 +156,11 @@ module Async
           db.execute(SQL::COMMIT)
           result
         rescue StandardError
-          db.execute(SQL::ROLLBACK) rescue nil
+          begin
+            db.execute(SQL::ROLLBACK)
+          rescue StandardError
+            nil
+          end
           raise
         end
       end

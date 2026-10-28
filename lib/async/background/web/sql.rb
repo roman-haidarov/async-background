@@ -4,11 +4,11 @@ module Async
   module Background
     module Web
       module SQL
-        BEGIN_READ_TRANSACTION = 'BEGIN'.freeze
-        COMMIT = 'COMMIT'.freeze
-        ROLLBACK = 'ROLLBACK'.freeze
-        QUERY_ONLY = 'PRAGMA query_only = ON'.freeze
-        BUSY_TIMEOUT = 'PRAGMA busy_timeout = 2000'.freeze
+        BEGIN_READ_TRANSACTION = 'BEGIN'
+        COMMIT = 'COMMIT'
+        ROLLBACK = 'ROLLBACK'
+        QUERY_ONLY = 'PRAGMA query_only = ON'
+        BUSY_TIMEOUT = 'PRAGMA busy_timeout = 2000'
         BASE_COLUMNS = %w[id class_name args options].freeze
 
         STATUS_PREDICATE = {
@@ -35,8 +35,8 @@ module Async
           failed: ['finished_at', :desc]
         }.freeze
 
-        ORDER_SQL = {asc: 'ORDER BY %<column>s, id', desc: 'ORDER BY %<column>s DESC, id DESC'}.freeze
-        SEEK_SQL = {asc: '(%<column>s, id) > (?, ?)', desc: '(%<column>s, id) < (?, ?)'}.freeze
+        ORDER_SQL = { asc: 'ORDER BY %<column>s, id', desc: 'ORDER BY %<column>s DESC, id DESC' }.freeze
+        SEEK_SQL = { asc: '(%<column>s, id) > (?, ?)', desc: '(%<column>s, id) < (?, ?)' }.freeze
 
         def self.columns_for(status)
           (BASE_COLUMNS + EXTRA_COLUMNS.fetch(status)).join(', ')

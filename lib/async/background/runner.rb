@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'runtime'
+require_relative 'runner/lifecycle'
 require_relative 'runner/queue_execution'
 require_relative 'runner/schedule'
 
@@ -21,8 +22,15 @@ module Async
 
     class Runner
       include Clock
+      include Lifecycle
       include QueueExecution
       include Schedule
+
+      Settings = Data.define(
+        :config_path, :job_count, :queue_socket_dir, :queue_db_path, :queue_mmap,
+        :drain_timeout, :metrics_shm_path
+      )
+      private_constant :Settings
 
       attr_reader :logger,
                   :semaphore,
@@ -35,33 +43,43 @@ module Async
                   :jobs,
                   :services
 
-      def initialize(
-        config_path: nil,
-        job_count: 2,
-        worker_index:,
-        total_workers:,
-        queue_socket_dir: nil,
-        queue_db_path: nil,
-        queue_mmap: true,
-        drain_timeout: DRAIN_GRACE,
-        metrics_shm_path: Metrics.default_shm_path
-      )
+      def initialize(worker_index:, total_workers:, **options)
+        settings = Settings.new(**default_settings.merge(options))
+        initialize_worker(worker_index, total_workers, settings)
+      end
+
+      def default_settings
+        {
+          config_path: nil,
+          job_count: 2,
+          queue_socket_dir: nil,
+          queue_db_path: nil,
+          queue_mmap: true,
+          drain_timeout: DRAIN_GRACE,
+          metrics_shm_path: Metrics.default_shm_path
+        }
+      end
+
+      def initialize_worker(worker_index, total_workers, settings)
+        config_path = settings.config_path
+        job_count = settings.job_count
         @logger = Console.logger
         @worker_index = worker_index
         @total_workers = total_workers
         @running = true
-        @drain_timeout = drain_timeout
+        @drain_timeout = settings.drain_timeout
         @shutdown = Runtime::Notification.new
-        @metrics = Metrics.new(worker_index: worker_index, total_workers: total_workers, shm_path: metrics_shm_path)
+        @metrics = Metrics.new(worker_index: worker_index, total_workers: total_workers, shm_path: settings.metrics_shm_path)
         logger.info { "Async::Background worker_index=#{worker_index}/#{total_workers}, job_count=#{job_count}" }
 
         @jobs = Runtime::TaskGroup.new(on_error: error_handler, on_release: method(:job_released))
         @services = Runtime::TaskGroup.new(on_error: error_handler)
         @semaphore = Runtime::Semaphore.new(job_count)
         @heap = config_path.nil? ? MinHeap.new : build_heap(config_path)
-        setup_queue(queue_socket_dir, queue_db_path, queue_mmap)
+        setup_queue(settings.queue_socket_dir, settings.queue_db_path, settings.queue_mmap)
         validate_work_source!(config_path)
       end
+      private :default_settings, :initialize_worker
 
       def run
         Runtime.scheduler!
@@ -142,8 +160,8 @@ module Async
         end
       end
 
-      def spawn_job(&block)
-        @jobs.spawn(name: 'job') { |task| semaphore.acquire { block.call(task) } }
+      def spawn_job
+        @jobs.spawn(name: 'job') { |task| semaphore.acquire { yield(task) } }
       end
 
       def job_released(_task)
@@ -154,133 +172,46 @@ module Async
 
       def run_job(job_task, entry)
         metrics_started = false
-        metrics.job_started(entry)
-        metrics_started = true
-        started_at = monotonic_now
-        job_task.with_timeout(entry.timeout) { entry.job_class.perform_now }
-
-        duration = monotonic_now - started_at
-        metrics.job_succeeded(entry, duration)
-        logger.info('Async::Background') { "#{entry.name}: completed in #{duration.round(2)}s" }
+        metrics_started = start_job_metrics(entry)
+        execute_entry_job(job_task, entry)
       rescue Runtime::TimeoutError
-        metrics.job_timed_out(entry)
-        logger.error('Async::Background') { "#{entry.name}: timed out after #{entry.timeout}s" }
-      rescue StandardError => error
-        metrics.job_failed(entry, error)
-        logger.error('Async::Background') {
-          "#{entry.name}: #{error.class} #{error.message}\n#{error.backtrace.join("\n")}"
-        }
+        record_job_timeout(entry)
+      rescue StandardError => e
+        record_job_failure(entry, e)
       ensure
         metrics.job_stopped(entry) if metrics_started
       end
 
-      def setup_signal_handlers
-        @signal_r, @signal_w = IO.pipe
-
-        %w[INT TERM].each do |signal|
-          Signal.trap(signal) do
-            @running = false
-            @signal_w.write_nonblock('.') rescue nil
-          end
-        end
+      def start_job_metrics(entry)
+        metrics.job_started(entry)
+        true
       end
 
-      def start_signal_watcher
-        @services.spawn(name: 'signal-watcher') do
-          while running?
-            begin
-              @signal_r.wait_readable
-              @signal_r.read_nonblock(256)
-            rescue IO::WaitReadable
-              next
-            rescue IOError, Errno::EBADF
-              break
-            end
-
-            logger.info { 'Async::Background: stopping gracefully' } unless running?
-
-            shutdown.signal_all
-            @queue_waker&.signal
-          end
-        end
+      def execute_entry_job(job_task, entry)
+        started_at = monotonic_now
+        job_task.with_timeout(entry.timeout) { entry.job_class.perform_now }
+        record_job_success(entry, monotonic_now - started_at)
       end
 
-      def error_handler
-        @error_handler ||= begin
-          log = logger
-          lambda do |task, error|
-            log.error('Async::Background') do
-              "task #{task&.name || 'unnamed'} died: #{error.class} #{error.message}\n" \
-                "#{Array(error.backtrace).join("\n")}"
-            end
-          end
-        end
+      def record_job_success(entry, duration)
+        metrics.job_succeeded(entry, duration)
+        logger.info('Async::Background') { "#{entry.name}: completed in #{duration.round(2)}s" }
       end
 
-      def warn_unsafe_timeouts
-        return if Runtime.native_timeouts?
-
-        logger.warn('Async::Background') do
-          "#{Fiber.scheduler.class} does not implement #timeout_after; job timeouts " \
-            'fall back to stdlib Timeout and may interrupt an unrelated fiber'
-        end
+      def record_job_timeout(entry)
+        metrics.job_timed_out(entry)
+        logger.error('Async::Background') { "#{entry.name}: timed out after #{entry.timeout}s" }
       end
 
-      def wake_signal_watcher
-        @signal_w&.write_nonblock('.')
-      rescue StandardError
-        nil
+      def record_job_failure(entry, error)
+        metrics.job_failed(entry, error)
+        logger.error('Async::Background') do
+          "#{entry.name}: #{error.class} #{error.message}\n#{error.backtrace.join("\n")}"
+        end
       end
 
       def wait_with_shutdown(duration)
         shutdown.wait(duration)
-      end
-
-      def shutdown_gracefully
-        wake_services
-        drain_jobs
-        stop_services
-        close_queue
-        close_signal_pipe
-      end
-
-      def wake_services
-        shutdown.signal_all
-        wake_signal_watcher
-        @queue_waker&.signal
-      end
-
-      def drain_jobs
-        return if @jobs.empty?
-
-        logger.info { "Async::Background: draining #{@jobs.size} in-flight job(s)" }
-        @jobs.wait(@drain_timeout)
-      rescue Runtime::TimeoutError
-        logger.warn('Async::Background') do
-          "#{@jobs.size} job(s) still running after #{@drain_timeout}s, cancelling"
-        end
-        @jobs.stop_all(JOB_CANCEL_GRACE)
-      end
-
-      def stop_services
-        return if @services.empty?
-
-        @services.wait(SERVICE_SHUTDOWN_GRACE)
-      rescue Runtime::TimeoutError
-        logger.warn('Async::Background') { 'service tasks did not exit in time, cancelling' }
-        @services.stop_all(SERVICE_CANCEL_GRACE)
-      end
-
-      def close_queue
-        @queue_waker&.close
-        @queue_store&.close
-      end
-
-      def close_signal_pipe
-        @signal_r&.close
-        @signal_w&.close
-      rescue IOError
-        nil
       end
     end
   end

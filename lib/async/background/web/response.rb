@@ -49,7 +49,7 @@ module Async
         ERROR_BODY = ERRORS.to_h { |name, (_, code)| [name, JSON.generate(error: code).freeze] }.freeze
 
         def headers(content_type, cache_control, security = BASE_SECURITY_HEADERS)
-          {'content-type' => content_type, 'cache-control' => cache_control}.merge(security)
+          { 'content-type' => content_type, 'cache-control' => cache_control }.merge(security)
         end
 
         def no_store_headers(content_type) = headers(content_type, NO_STORE)

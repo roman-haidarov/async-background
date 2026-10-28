@@ -13,11 +13,11 @@ module Async
         include Clock
 
         CacheEntry = Data.define(:value, :created_at)
-        RAW_COLUMNS = {'args' => :args_raw, 'options' => :options_raw}.freeze
+        RAW_COLUMNS = { 'args' => :args_raw, 'options' => :options_raw }.freeze
 
         ROW_KEYS = SQL::EXTRA_COLUMNS.to_h do |status, extra|
           columns = SQL::BASE_COLUMNS + extra
-          [status, columns.map { |column| RAW_COLUMNS.fetch(column, column.to_sym) }.freeze]
+            [status, columns.map { |column| RAW_COLUMNS.fetch(column) { column.to_sym } }.freeze]
         end.freeze
 
         PAGING = {
@@ -109,8 +109,8 @@ module Async
           SQLite3::Database.new(database_uri, uri: true)
         rescue LoadError
           raise
-        rescue StandardError => error
-          raise UnavailableError, "cannot open queue database: #{error.message}"
+        rescue StandardError => e
+          raise UnavailableError, "cannot open queue database: #{e.message}"
         end
 
         def database_uri
@@ -192,7 +192,7 @@ module Async
           require 'sqlite3'
         rescue LoadError
           raise LoadError,
-                "sqlite3 gem is required for Async::Background::Web. " \
+                'sqlite3 gem is required for Async::Background::Web. ' \
                 "Add `gem 'sqlite3', '~> 2.0'` to your Gemfile."
         end
       end

@@ -31,7 +31,8 @@ module Async
         def signal_all
           return nil if @waiters.empty?
 
-          pending, @waiters = @waiters, []
+          pending = @waiters
+          @waiters = []
           pending.each { |waiter| Runtime.wake_dequeued(waiter, self) }
           nil
         end

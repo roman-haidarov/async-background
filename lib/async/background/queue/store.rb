@@ -24,7 +24,7 @@ module Async
         FAILED_RETENTION_AGE = 7 * 24 * 3600
         CLEANUP_VACUUM_THRESHOLD = 100
         ERROR_MESSAGE_MAX_LEN = 2_000
-        EMPTY_ARGS_JSON = '[]'.freeze
+        EMPTY_ARGS_JSON = '[]'
 
         attr_reader :path, :options
 
@@ -131,7 +131,8 @@ module Async
           @db.changes.positive?
         end
 
-        def fail(job_id, claim_token:, error_class: nil, error_message: nil, finished_at: realtime_now, duration_ms: nil)
+        def fail(job_id, claim_token:, error_class: nil, error_message: nil, finished_at: realtime_now,
+                 duration_ms: nil)
           ensure_connection
           bind_failure(@fail_stmt, finished_at, duration_ms, error_class, error_message, job_id, claim_token)
           @db.changes.positive?
@@ -153,8 +154,11 @@ module Async
             next unless lease_alive?(job_id, claim_token)
 
             policy = retry_policy(stored_options, fallback_options)
-            policy_retries?(policy) ? retry_job!(job_id, claim_token, policy, error_class, error_message) :
+            if policy_retries?(policy)
+              retry_job!(job_id, claim_token, policy, error_class, error_message)
+            else
               fail_job!(job_id, claim_token, error_class, error_message, finished_at, duration_ms)
+            end
           end
         end
 
@@ -178,7 +182,11 @@ module Async
           return unless connected?
 
           finalize_statements
-          @db.execute(SQL::OPTIMIZE) rescue nil
+          begin
+            @db.execute(SQL::OPTIMIZE)
+          rescue StandardError
+            nil
+          end
           @db.close
           @db = nil
           @schema_checked = false
@@ -211,7 +219,7 @@ module Async
           require 'sqlite3'
         rescue LoadError
           raise LoadError,
-                "sqlite3 gem is required for Async::Background::Queue. " \
+                'sqlite3 gem is required for Async::Background::Queue. ' \
                 "Add `gem 'sqlite3', '~> 2.0'` to your Gemfile."
         end
 
@@ -338,7 +346,11 @@ module Async
           yield statement if block_given?
           statement.step
         ensure
-          statement.reset! rescue nil
+          begin
+            statement.reset!
+          rescue StandardError
+            nil
+          end
         end
 
         def dump_args(args)
@@ -383,7 +395,11 @@ module Async
         end
 
         def finalize_statements
-          statements.each { |statement| statement&.close rescue nil }
+          statements.each do |statement|
+            statement&.close
+          rescue StandardError
+            nil
+          end
           clear_statements
         end
 

@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.1.1
+
+### Changed
+
+- Refactored runner lifecycle and queue execution, runtime task coordination,
+  job option normalization, metrics access, and web request handling into
+  smaller focused components.
+- Moved dashboard HTML, CSS, and JavaScript into separate packaged assets.
+- No public API or queue schema changes are intended.
+
+### Validation
+
+- Full spec suite: 431 examples, 0 failures.
+
 ## 1.1.0
 
 The gem no longer depends on `async`. The same worker runs under any

@@ -48,6 +48,40 @@ module Async
 
       module_function
 
+      module FiberLocals
+        def current_task
+          fiber_local(CURRENT_TASK_KEY)
+        end
+
+        def current_task=(task)
+          set_fiber_local(CURRENT_TASK_KEY, task)
+        end
+
+        def fiber_local(key)
+          Fiber[key]
+        rescue ArgumentError, FiberError
+          fiber_local_fallback[key]
+        end
+
+        def set_fiber_local(key, value)
+          Fiber[key] = value
+        rescue ArgumentError, FiberError
+          fiber_local_fallback[key] = value
+        end
+
+        def clear_fiber_local(key, expected)
+          current = fiber_local(key)
+          set_fiber_local(key, nil) if current.equal?(expected)
+        end
+
+        def fiber_local_fallback
+          fiber = Fiber.current
+          store = fiber.instance_variable_get(:@async_background_locals)
+          store || fiber.instance_variable_set(:@async_background_locals, {})
+        end
+      end
+      extend FiberLocals
+
       def spawn(name: nil, on_error: UNSET, &block)
         Task.spawn(name: name, on_error: on_error, &block)
       end
@@ -62,14 +96,6 @@ module Async
 
       def native_timeouts?(target = Fiber.scheduler)
         !target.nil? && target.respond_to?(:timeout_after)
-      end
-
-      def current_task
-        fiber_local(CURRENT_TASK_KEY)
-      end
-
-      def current_task=(task)
-        set_fiber_local(CURRENT_TASK_KEY, task)
       end
 
       def build_waiter(blocker)
@@ -94,25 +120,29 @@ module Async
         scheduler = waiter[:scheduler]
         task = current_task
         task&.enter_block(waiter)
-
-        until waiter[:ready] || yield
-          if deadline
-            remaining = deadline - monotonic_now
-            return false if remaining <= 0
-
-            scheduler.block(blocker, remaining)
-          else
-            scheduler.block(blocker, nil)
-          end
-
-          task&.raise_if_cancelled!
-        end
-
-        true
+        park_until_ready(scheduler, blocker, waiter, deadline, task) { yield }
       ensure
         waiter[:blocker] = nil
         clear_fiber_local(WAITER_KEY, waiter)
         task&.exit_block
+      end
+
+      def park_until_ready(scheduler, blocker, waiter, deadline, task)
+        until waiter[:ready] || yield
+          return false if wait_for_blocker(scheduler, blocker, deadline) == :expired
+
+          task&.raise_if_cancelled!
+        end
+        true
+      end
+
+      def wait_for_blocker(scheduler, blocker, deadline)
+        return scheduler.block(blocker, nil) unless deadline
+
+        remaining = deadline - monotonic_now
+        return :expired if remaining <= 0
+
+        scheduler.block(blocker, remaining)
       end
 
       def with_waiter(blocker, waiters)
@@ -153,13 +183,9 @@ module Async
         monotonic_now + seconds
       end
 
-      def error_handler=(handler)
-        @error_handler = handler
-      end
-
-      def error_handler
-        @error_handler
-      end
+      attr_writer :error_handler
+      attr_reader :error_handler
+      module_function :error_handler=, :error_handler
 
       def with_error_handler(handler)
         previous = @error_handler
@@ -179,37 +205,14 @@ module Async
         false
       end
 
-      def fiber_local(key)
-        Fiber[key]
-      rescue ArgumentError, FiberError
-        fiber_local_fallback[key]
-      end
-
-      def set_fiber_local(key, value)
-        Fiber[key] = value
-      rescue ArgumentError, FiberError
-        fiber_local_fallback[key] = value
-      end
-
-      def clear_fiber_local(key, expected)
-        current = fiber_local(key)
-        set_fiber_local(key, nil) if current.equal?(expected)
-      end
-
-      def fiber_local_fallback
-        fiber = Fiber.current
-        store = fiber.instance_variable_get(:@async_background_locals)
-        store || fiber.instance_variable_set(:@async_background_locals, {})
-      end
-
-      def with_timeout(duration, on_timeout: UNSET)
+      def with_timeout(duration, on_timeout: UNSET, &block)
         return yield if duration.nil?
 
         seconds = Float(duration)
         raise ArgumentError, 'timeout must be positive and finite' unless seconds.finite? && seconds.positive?
 
         begin
-          arm_deadline(seconds) { yield }
+          arm_deadline(seconds, &block)
         rescue Deadline => e
           raise TimeoutError, e.message if UNSET.equal?(on_timeout)
 
